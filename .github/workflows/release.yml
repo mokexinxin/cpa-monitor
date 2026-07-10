@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        env:
+          GOWORK: "off"
+          GOTOOLCHAIN: local
+        run: go test -mod=readonly ./...
+
+      - name: Build static Linux binaries
+        env:
+          GOWORK: "off"
+          GOTOOLCHAIN: local
+          CGO_ENABLED: "0"
+          GOOS: linux
+        run: |
+          mkdir -p dist
+          GOARCH=amd64 go build -mod=readonly -trimpath -ldflags="-s -w" -o dist/cpa-monitor-linux-amd64 ./cmd/cpa-monitor
+          GOARCH=arm64 go build -mod=readonly -trimpath -ldflags="-s -w" -o dist/cpa-monitor-linux-arm64 ./cmd/cpa-monitor
+          cd dist
+          sha256sum cpa-monitor-linux-amd64 cpa-monitor-linux-arm64 > checksums.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/cpa-monitor-linux-amd64 \
+            dist/cpa-monitor-linux-arm64 \
+            dist/checksums.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "cpa-monitor $GITHUB_REF_NAME"

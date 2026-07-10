@@ -214,7 +214,33 @@ config-check/daemon/one-shot/timer systemd units. It then enables exactly one
 scheduling mode. It requires a Linux host booted with systemd and `flock` from
 util-linux.
 
-For a first installation from this source tree, install Go 1.26 or newer and
+Install the latest published release interactively with one command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstrap.sh | sudo bash
+```
+
+The bootstrap supports Linux `amd64` and `arm64`. It downloads the latest
+static binary and version-matched installer from GitHub Releases, verifies the
+binary against the published SHA-256 checksum, and then starts the setup
+prompts. The server needs `curl`, systemd, and `flock`; it does not need Go.
+
+Timer mode can also be selected in the same command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstrap.sh | \
+  sudo bash -s -- --mode timer --timer-interval 5min
+```
+
+To audit or pin what is executed, inspect `bootstrap.sh` first or set
+`CPA_MONITOR_VERSION` to a release tag:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.1.0/bootstrap.sh | \
+  sudo env CPA_MONITOR_VERSION=v0.1.0 bash
+```
+
+For an installation from a local source checkout, install Go 1.26 or newer and
 run:
 
 ```sh
@@ -257,9 +283,10 @@ needed. Protect the file, then install it:
 
 ```sh
 chmod 600 /secure/cpa-monitor.env
-sudo ./install.sh --non-interactive \
-  --config /secure/cpa-monitor.yaml \
-  --env-file /secure/cpa-monitor.env
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstrap.sh | \
+  sudo bash -s -- --non-interactive \
+    --config /secure/cpa-monitor.yaml \
+    --env-file /secure/cpa-monitor.env
 ```
 
 The environment file is systemd syntax, not a shell script; do not `source` it.
