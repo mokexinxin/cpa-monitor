@@ -16,6 +16,31 @@ Alerts are sent through SMTP once when a condition becomes unhealthy. The
 same key is suppressed until it recovers. Optional recovery mail can be
 enabled.
 
+## Quick install (Linux)
+
+Install the latest release on a Linux `amd64` or `arm64` server with one
+command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstrap.sh | sudo bash
+```
+
+The bootstrap verifies the release SHA-256 checksum, opens the interactive
+configuration prompts, installs the systemd units, and starts
+`cpa-monitor.service`. The server needs systemd, `curl`, and `flock`; Go is not
+required.
+
+After installation:
+
+```sh
+sudo systemctl status cpa-monitor.service
+sudo journalctl -u cpa-monitor.service -f
+```
+
+See [One-command Linux installation](#one-command-linux-installation) for
+timer mode, non-interactive setup, version pinning, upgrades, and installed
+paths.
+
 ## Build and test
 
 The project currently targets Go 1.26 and Linux deployment:
