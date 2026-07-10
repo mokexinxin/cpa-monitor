@@ -1,0 +1,6 @@
+29 23 0:25 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw
+36 25 8:1 / / rw,relatime - ext4 /dev/root rw
+37 36 8:2 / /data\040disk rw,relatime shared:7 - xfs /dev/sdb1 rw
+38 36 0:44 / /remote rw,nosuid,nodev - fuse.sshfs user@example:/ rw
+39 36 0:45 / /ignored rw,relatime - overlay overlay rw
+40 25 8:1 / / rw,relatime - ext4 /dev/root rw

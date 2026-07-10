@@ -1,0 +1,22 @@
+# Local builds and test artifacts
+/cpa-monitor
+/cpa-monitor-*
+/bin/
+/dist/
+*.test
+*.out
+*.prof
+coverage.*
+
+# Runtime configuration, credentials, state, and logs
+/config.yaml
+*.env
+/state/
+/logs/
+*.log
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
+*~

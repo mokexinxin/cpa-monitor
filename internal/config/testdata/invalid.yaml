@@ -1,0 +1,11 @@
+cliproxy:
+  management_key: fixture-management-key
+
+smtp:
+  host: smtp.example.com
+  from: cpa-monitor@example.com
+  to:
+    - operations@example.com
+
+thresholds:
+  memory_percent: 0

@@ -1,0 +1,1 @@
+36 25 8:1 / / rw,relatime ext4 /dev/root rw

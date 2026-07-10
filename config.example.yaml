@@ -1,0 +1,41 @@
+interval: 60s
+
+cliproxy:
+  base_url: http://127.0.0.1:8317
+  management_key: ""
+  management_key_env: CPA_MANAGEMENT_KEY
+  service_port: 0
+  timeout: 10s
+
+thresholds:
+  memory_percent: 80
+  disk_percent: 80
+  total_tcp_connections: 3000
+  service_port_connections: 800
+
+alerts:
+  send_recovery: false
+  state_file: state/alerts.json
+
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: ""
+  username_env: CPA_SMTP_USERNAME
+  password: ""
+  password_env: CPA_SMTP_PASSWORD
+  from: cpa-monitor@example.com
+  to:
+    - admin@example.com
+  starttls: true
+  tls: false
+  timeout: 10s
+
+logging:
+  level: info
+  file:
+    enabled: false
+    path: logs/monitor.log
+    max_size_mb: 20
+    max_files: 5
+    max_total_size_mb: 80
