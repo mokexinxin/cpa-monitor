@@ -28,12 +28,13 @@ const (
 
 // Config is the complete cpa-monitor configuration.
 type Config struct {
-	Interval   Duration         `yaml:"interval"`
-	CLIProxy   CLIProxyConfig   `yaml:"cliproxy"`
-	Thresholds ThresholdsConfig `yaml:"thresholds"`
-	Alerts     AlertsConfig     `yaml:"alerts"`
-	SMTP       SMTPConfig       `yaml:"smtp"`
-	Logging    LoggingConfig    `yaml:"logging"`
+	Interval     Duration           `yaml:"interval"`
+	CLIProxy     CLIProxyConfig     `yaml:"cliproxy"`
+	Thresholds   ThresholdsConfig   `yaml:"thresholds"`
+	Alerts       AlertsConfig       `yaml:"alerts"`
+	HealthReport HealthReportConfig `yaml:"health_report"`
+	SMTP         SMTPConfig         `yaml:"smtp"`
+	Logging      LoggingConfig      `yaml:"logging"`
 }
 
 // CLIProxyConfig controls CLIProxyAPI health and management requests.
@@ -57,6 +58,15 @@ type ThresholdsConfig struct {
 type AlertsConfig struct {
 	SendRecovery bool   `yaml:"send_recovery"`
 	StateFile    string `yaml:"state_file"`
+}
+
+// HealthReportConfig controls scheduled healthy-status email delivery. It is
+// disabled by default so upgrading an existing configuration never starts a
+// new class of email without an explicit choice.
+type HealthReportConfig struct {
+	Enabled       bool     `yaml:"enabled"`
+	Interval      Duration `yaml:"interval"`
+	RetryInterval Duration `yaml:"retry_interval"`
 }
 
 // SMTPConfig controls authenticated SMTP delivery. Exactly one of StartTLS and
@@ -108,6 +118,10 @@ func Default() Config {
 		},
 		Alerts: AlertsConfig{
 			StateFile: defaultStateFile,
+		},
+		HealthReport: HealthReportConfig{
+			Interval:      Duration{Duration: 24 * time.Hour},
+			RetryInterval: Duration{Duration: 15 * time.Minute},
 		},
 		SMTP: SMTPConfig{
 			Port:     587,
@@ -255,6 +269,12 @@ func (c Config) Validate() error {
 
 	if strings.TrimSpace(c.Alerts.StateFile) == "" {
 		return errors.New("alerts.state_file must not be empty")
+	}
+	if c.HealthReport.Interval.Duration <= 0 {
+		return errors.New("health_report.interval must be greater than zero")
+	}
+	if c.HealthReport.RetryInterval.Duration <= 0 {
+		return errors.New("health_report.retry_interval must be greater than zero")
 	}
 	if _, ok := map[string]struct{}{"debug": {}, "info": {}, "warn": {}, "error": {}}[c.Logging.Level]; !ok {
 		return errors.New("logging.level must be one of debug, info, warn, or error")

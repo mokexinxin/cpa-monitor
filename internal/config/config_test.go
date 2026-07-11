@@ -44,6 +44,15 @@ func TestLoadAppliesDocumentedDefaults(t *testing.T) {
 	if got, want := cfg.Alerts.StateFile, "state/alerts.json"; got != want {
 		t.Errorf("Alerts.StateFile = %q, want %q", got, want)
 	}
+	if cfg.HealthReport.Enabled {
+		t.Error("HealthReport.Enabled = true, want false")
+	}
+	if got, want := cfg.HealthReport.Interval.Duration, 24*time.Hour; got != want {
+		t.Errorf("HealthReport.Interval = %v, want %v", got, want)
+	}
+	if got, want := cfg.HealthReport.RetryInterval.Duration, 15*time.Minute; got != want {
+		t.Errorf("HealthReport.RetryInterval = %v, want %v", got, want)
+	}
 	if got, want := cfg.SMTP.Port, 587; got != want {
 		t.Errorf("SMTP.Port = %d, want %d", got, want)
 	}
@@ -324,6 +333,8 @@ func TestValidation(t *testing.T) {
 		{name: "enabled zero total", yaml: baseYAML("logging:\n  file:\n    enabled: true\n    max_total_size_mb: 0"), wantInErr: "max_total_size_mb"},
 		{name: "total smaller than file", yaml: baseYAML("logging:\n  file:\n    enabled: true\n    max_size_mb: 20\n    max_total_size_mb: 19"), wantInErr: "max_total_size_mb"},
 		{name: "empty state file", yaml: baseYAML("alerts:\n  state_file: ''"), wantInErr: "state_file"},
+		{name: "zero health interval", yaml: baseYAML("health_report:\n  interval: 0s"), wantInErr: "health_report.interval"},
+		{name: "zero health retry interval", yaml: baseYAML("health_report:\n  retry_interval: 0s"), wantInErr: "health_report.retry_interval"},
 	}
 
 	for _, tt := range tests {

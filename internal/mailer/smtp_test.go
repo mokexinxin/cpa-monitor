@@ -152,6 +152,29 @@ func TestSendDeliversOverVerifiedTLS(t *testing.T) {
 	}
 }
 
+func TestSendHealthDeliversMultipartReport(t *testing.T) {
+	server := newFakeSMTPServer(t, fakeSMTPOptions{})
+	defer server.closeAndCheck(t)
+	client, err := New(server.clientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendHealth(context.Background(), validHealthReport()); err != nil {
+		t.Fatalf("SendHealth() error = %v", err)
+	}
+	message, err := mail.ReadMessage(strings.NewReader(server.snapshot().data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := message.Header.Get("Subject"); got != "[CPA Monitor] HEALTHY monitor-01" {
+		t.Fatalf("Subject = %q", got)
+	}
+	parts := readAlternative(t, message)
+	if !strings.Contains(string(parts["text/html"]), "All systems are operating normally") {
+		t.Fatal("delivered HTML health report is missing status heading")
+	}
+}
+
 func TestSendRejectsUntrustedOrWrongNameCertificates(t *testing.T) {
 	tests := []struct {
 		name   string

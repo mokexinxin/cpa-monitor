@@ -17,6 +17,14 @@ alerts:
   send_recovery: false
   state_file: state/alerts.json
 
+# When enabled, the first completely healthy monitoring cycle sends a report
+# immediately. Later reports follow interval; failed deliveries use the shorter
+# retry interval. Times persist in alerts.state_file across service restarts.
+health_report:
+  enabled: true
+  interval: 24h
+  retry_interval: 15m
+
 smtp:
   host: smtp.example.com
   port: 587

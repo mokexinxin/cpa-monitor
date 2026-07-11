@@ -99,12 +99,28 @@ func (m *Mailer) Send(ctx context.Context, event Event) error {
 	if ctx == nil {
 		return fmt.Errorf("SMTP context must not be nil")
 	}
-	if err := ctx.Err(); err != nil {
-		return m.sendError(ctx, "SMTP send canceled", err)
-	}
 	message, err := BuildMessage(m.config.From, m.config.To, event)
 	if err != nil {
 		return err
+	}
+	return m.send(ctx, message)
+}
+
+// SendHealth constructs and delivers one scheduled healthy-status report.
+func (m *Mailer) SendHealth(ctx context.Context, report HealthReport) error {
+	if ctx == nil {
+		return fmt.Errorf("SMTP context must not be nil")
+	}
+	message, err := BuildHealthMessage(m.config.From, m.config.To, report)
+	if err != nil {
+		return err
+	}
+	return m.send(ctx, message)
+}
+
+func (m *Mailer) send(ctx context.Context, message []byte) error {
+	if err := ctx.Err(); err != nil {
+		return m.sendError(ctx, "SMTP send canceled", err)
 	}
 
 	sendCtx, cancel := context.WithTimeout(ctx, m.config.Timeout)

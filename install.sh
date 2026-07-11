@@ -93,6 +93,9 @@ First-install automation variables:
   CPA_MONITOR_SMTP_MODE            starttls (default) or tls
   CPA_MONITOR_SMTP_USERNAME        optional; requires matching password
   CPA_MONITOR_SMTP_PASSWORD        optional; requires matching username
+  CPA_MONITOR_HEALTH_REPORT_ENABLED        default true
+  CPA_MONITOR_HEALTH_REPORT_INTERVAL       default 24h
+  CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL default 15m
 
 Thresholds and logging can also be set with:
   CPA_MONITOR_MEMORY_PERCENT, CPA_MONITOR_DISK_PERCENT,
@@ -350,8 +353,9 @@ validate_bool() {
 
 validate_monitor_duration() {
     local value="$1"
-    [[ "$value" =~ ^([0-9]+(ns|us|ms|s|m|h))+$ ]] || die "CPA_MONITOR_INTERVAL must be a positive Go duration such as 60s or 5m"
-    [[ ! "$value" =~ ^0+(ns|us|ms|s|m|h)$ ]] || die "CPA_MONITOR_INTERVAL must be greater than zero"
+    local field="${2:-CPA_MONITOR_INTERVAL}"
+    [[ "$value" =~ ^([0-9]+(ns|us|ms|s|m|h))+$ ]] || die "${field} must be a positive Go duration such as 60s or 5m"
+    [[ ! "$value" =~ ^0+(ns|us|ms|s|m|h)$ ]] || die "${field} must be greater than zero"
 }
 
 validate_timer_interval() {
@@ -416,6 +420,9 @@ load_generation_values() {
     TOTAL_TCP_CONNECTIONS="${CPA_MONITOR_TOTAL_TCP_CONNECTIONS:-3000}"
     SERVICE_PORT_CONNECTIONS="${CPA_MONITOR_SERVICE_PORT_CONNECTIONS:-800}"
     SEND_RECOVERY="${CPA_MONITOR_SEND_RECOVERY:-false}"
+    HEALTH_REPORT_ENABLED="${CPA_MONITOR_HEALTH_REPORT_ENABLED:-true}"
+    HEALTH_REPORT_INTERVAL="${CPA_MONITOR_HEALTH_REPORT_INTERVAL:-24h}"
+    HEALTH_REPORT_RETRY_INTERVAL="${CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL:-15m}"
     LOG_LEVEL="${CPA_MONITOR_LOG_LEVEL:-info}"
     LOG_FILE_ENABLED="${CPA_MONITOR_LOG_FILE_ENABLED:-true}"
     LOG_MAX_SIZE_MB="${CPA_MONITOR_LOG_MAX_SIZE_MB:-20}"
@@ -438,6 +445,14 @@ collect_interactive_values() {
         BASE_URL="$PROMPT_RESULT"
         prompt_plain "Monitor interval" "$MONITOR_INTERVAL"
         MONITOR_INTERVAL="$PROMPT_RESULT"
+        prompt_plain "Enable periodic healthy email (true/false)" "$HEALTH_REPORT_ENABLED"
+        HEALTH_REPORT_ENABLED="$PROMPT_RESULT"
+        if [[ "$HEALTH_REPORT_ENABLED" == "true" ]]; then
+            prompt_plain "Healthy email interval" "$HEALTH_REPORT_INTERVAL"
+            HEALTH_REPORT_INTERVAL="$PROMPT_RESULT"
+            prompt_plain "Healthy email retry interval after failure" "$HEALTH_REPORT_RETRY_INTERVAL"
+            HEALTH_REPORT_RETRY_INTERVAL="$PROMPT_RESULT"
+        fi
         prompt_plain "SMTP mode (starttls/tls)" "$SMTP_MODE"
         SMTP_MODE="$PROMPT_RESULT"
         if [[ -z "$SMTP_PORT" ]]; then
@@ -490,7 +505,10 @@ validate_generation_values() {
         reject_line_breaks "CPA_MONITOR_BASE_URL" "$BASE_URL"
         reject_line_breaks "CPA_MONITOR_SMTP_HOST" "$SMTP_HOST"
         reject_line_breaks "CPA_MONITOR_SMTP_FROM" "$SMTP_FROM"
-        validate_monitor_duration "$MONITOR_INTERVAL"
+        validate_monitor_duration "$MONITOR_INTERVAL" "CPA_MONITOR_INTERVAL"
+        validate_bool "CPA_MONITOR_HEALTH_REPORT_ENABLED" "$HEALTH_REPORT_ENABLED"
+        validate_monitor_duration "$HEALTH_REPORT_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_INTERVAL"
+        validate_monitor_duration "$HEALTH_REPORT_RETRY_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL"
         validate_base_url_transport "$BASE_URL"
         validate_port "CPA_MONITOR_SERVICE_PORT" "$SERVICE_PORT"
         validate_positive_int "CPA_MONITOR_MEMORY_PERCENT" "$MEMORY_PERCENT"
@@ -553,6 +571,11 @@ thresholds:
 alerts:
   send_recovery: ${SEND_RECOVERY}
   state_file: ${PROD_STATE_DIR}/state/alerts.json
+
+health_report:
+  enabled: ${HEALTH_REPORT_ENABLED}
+  interval: $(yaml_quote "$HEALTH_REPORT_INTERVAL")
+  retry_interval: $(yaml_quote "$HEALTH_REPORT_RETRY_INTERVAL")
 
 smtp:
   host: $(yaml_quote "$SMTP_HOST")

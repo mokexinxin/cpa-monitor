@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
 	"strings"
@@ -64,11 +65,9 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 	if got, want := msg.Header.Get("MIME-Version"), "1.0"; got != want {
 		t.Fatalf("MIME-Version = %q, want %q", got, want)
 	}
-	if got := msg.Header.Get("Content-Type"); !strings.EqualFold(got, "text/plain; charset=UTF-8") {
-		t.Fatalf("Content-Type = %q, want UTF-8 text/plain", got)
-	}
-	if got, want := msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable"; !strings.EqualFold(got, want) {
-		t.Fatalf("Content-Transfer-Encoding = %q, want %q", got, want)
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/alternative" || params["boundary"] == "" {
+		t.Fatalf("Content-Type = %q, err=%v, want multipart/alternative", msg.Header.Get("Content-Type"), err)
 	}
 
 	decodedSubject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
@@ -82,10 +81,8 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 		t.Fatalf("raw UTF-8 Subject is not encoded: %s", raw)
 	}
 
-	body, err := io.ReadAll(quotedprintable.NewReader(msg.Body))
-	if err != nil {
-		t.Fatalf("read body: %v", err)
-	}
+	parts := readAlternative(t, msg)
+	body := parts["text/plain"]
 	for _, want := range []string{
 		"Event: ALERT",
 		"Host: monitor-01",
@@ -99,6 +96,53 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 		if !bytes.Contains(body, []byte(want)) {
 			t.Errorf("body does not contain %q:\n%s", want, body)
 		}
+	}
+	htmlBody := string(parts["text/html"])
+	for _, want := range []string{"CPA MONITOR", "ALERT", "monitor-01", "auth:account-7", "CLIProxyAPI"} {
+		if !strings.Contains(htmlBody, want) {
+			t.Errorf("HTML body does not contain %q", want)
+		}
+	}
+}
+
+func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
+	t.Parallel()
+	report := validHealthReport()
+	report.Hostname = `host-01<script>alert("x")</script>`
+	raw, err := BuildHealthMessage("monitor@example.com", []string{"admin@example.com"}, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOnlyCRLF(t, raw)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodedSubject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodedSubject != "[CPA Monitor] HEALTHY "+report.Hostname {
+		t.Fatalf("Subject = %q", decodedSubject)
+	}
+	parts := readAlternative(t, msg)
+	plain := string(parts["text/plain"])
+	for _, want := range []string{"Status: HEALTHY - all checks passed", "Memory: 42.5% used", "Service port 8317: 11 connections", "Accounts: 3 checked"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("plain body does not contain %q:\n%s", want, plain)
+		}
+	}
+	htmlBody := string(parts["text/html"])
+	for _, want := range []string{"HEALTHY", "All systems are operating normally", "Memory", "Highest disk", "Total TCP", "Port 8317", "Next scheduled report"} {
+		if !strings.Contains(htmlBody, want) {
+			t.Errorf("HTML body does not contain %q", want)
+		}
+	}
+	if strings.Contains(htmlBody, `<script>alert`) || !strings.Contains(htmlBody, `&lt;script&gt;`) {
+		t.Fatalf("dynamic hostname was not HTML escaped:\n%s", htmlBody)
+	}
+	if !strings.Contains(htmlBody, "#166534") || !strings.Contains(htmlBody, "HEALTHY") {
+		t.Fatal("health status must use both visible text and accessible high-contrast color")
 	}
 }
 
@@ -193,6 +237,58 @@ func validEvent() Event {
 		Details:   "used=842 MiB total=1000 MiB",
 		BaseURL:   "http://127.0.0.1:8317",
 	}
+}
+
+func validHealthReport() HealthReport {
+	return HealthReport{
+		Hostname:               "monitor-01",
+		Timestamp:              time.Date(2026, time.July, 11, 3, 4, 5, 0, time.UTC),
+		NextScheduledAt:        time.Date(2026, time.July, 12, 3, 4, 5, 0, time.UTC),
+		BaseURL:                "http://127.0.0.1:8317",
+		MemoryUsedPercent:      42.5,
+		MemoryThreshold:        80,
+		HighestDiskUsedPercent: 51.2,
+		DiskMountCount:         2,
+		DiskThreshold:          80,
+		TotalTCPConnections:    19,
+		TotalTCPThreshold:      3000,
+		ServicePort:            8317,
+		ServicePortConnections: 11,
+		ServicePortThreshold:   800,
+		AccountCount:           3,
+	}
+}
+
+func readAlternative(t *testing.T, msg *mail.Message) map[string][]byte {
+	t.Helper()
+	mediaType, params, err := mime.ParseMediaType(msg.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/alternative" {
+		t.Fatalf("Content-Type = %q, err=%v", msg.Header.Get("Content-Type"), err)
+	}
+	reader := multipart.NewReader(msg.Body, params["boundary"])
+	result := make(map[string][]byte)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		partType, _, err := mime.ParseMediaType(part.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(quotedprintable.NewReader(part))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[partType] = body
+	}
+	if result["text/plain"] == nil || result["text/html"] == nil {
+		t.Fatalf("multipart alternatives = %#v", result)
+	}
+	return result
 }
 
 func assertOnlyCRLF(t *testing.T, data []byte) {

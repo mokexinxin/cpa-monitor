@@ -414,6 +414,10 @@ test_staged_first_install_and_daemon_activation() {
     assert_mode 644 "$timer"
 
     assert_contains "${root}/etc/cpa-monitor/config.yaml" 'state_file: /var/lib/cpa-monitor/state/alerts.json'
+    assert_contains "${root}/etc/cpa-monitor/config.yaml" 'health_report:'
+    assert_contains "${root}/etc/cpa-monitor/config.yaml" '  enabled: true'
+    assert_contains "${root}/etc/cpa-monitor/config.yaml" "  interval: '24h'"
+    assert_contains "${root}/etc/cpa-monitor/config.yaml" "  retry_interval: '15m'"
     assert_contains "${root}/etc/cpa-monitor/config.yaml" 'path: /var/log/cpa-monitor/monitor.log'
     assert_contains "${root}/etc/cpa-monitor/config.yaml" "- 'ops@example.com'"
     assert_not_contains "${root}/etc/cpa-monitor/config.yaml" 'first-management-key'

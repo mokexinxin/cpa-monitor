@@ -24,14 +24,36 @@ type Reconciler interface {
 	Reconcile(context.Context, rule.Batch) error
 }
 
+// HealthReporter receives a snapshot only after every monitoring scope is
+// complete, error-free, and has no active condition.
+type HealthReporter interface {
+	ReportHealthy(context.Context, HealthSnapshot) error
+}
+
+// HealthSnapshot contains the facts displayed in a scheduled health email.
+type HealthSnapshot struct {
+	MemoryUsedPercent      float64
+	MemoryThreshold        float64
+	HighestDiskUsedPercent float64
+	DiskMountCount         int
+	DiskThreshold          float64
+	TotalTCPConnections    int
+	TotalTCPThreshold      int
+	ServicePort            int
+	ServicePortConnections int
+	ServicePortThreshold   int
+	AccountCount           int
+}
+
 // Options contains Runner dependencies and already-validated configuration
 // values. NewRunner still validates the numeric invariants so a Runner cannot
 // silently turn an invalid threshold into misleading recovery state.
 type Options struct {
-	API        APIClient
-	Collector  collector.HostCollector
-	Reconciler Reconciler
-	Logger     *slog.Logger
+	API            APIClient
+	Collector      collector.HostCollector
+	Reconciler     Reconciler
+	HealthReporter HealthReporter
+	Logger         *slog.Logger
 
 	ServicePort            int
 	MemoryPercent          float64
@@ -42,10 +64,11 @@ type Options struct {
 
 // Runner executes all five monitoring scopes once in deterministic order.
 type Runner struct {
-	api        APIClient
-	collector  collector.HostCollector
-	reconciler Reconciler
-	logger     *slog.Logger
+	api            APIClient
+	collector      collector.HostCollector
+	reconciler     Reconciler
+	healthReporter HealthReporter
+	logger         *slog.Logger
 
 	servicePort            int
 	memoryPercent          float64
@@ -64,6 +87,9 @@ func NewRunner(options Options) (*Runner, error) {
 	}
 	if nilInterface(options.Reconciler) {
 		return nil, errors.New("monitor: nil reconciler")
+	}
+	if options.HealthReporter != nil && nilInterface(options.HealthReporter) {
+		return nil, errors.New("monitor: typed nil health reporter")
 	}
 	if options.ServicePort < 1 || options.ServicePort > 65535 {
 		return nil, errors.New("monitor: service port must be between 1 and 65535")
@@ -88,6 +114,7 @@ func NewRunner(options Options) (*Runner, error) {
 		api:                    options.API,
 		collector:              options.Collector,
 		reconciler:             options.Reconciler,
+		healthReporter:         options.HealthReporter,
 		logger:                 logger,
 		servicePort:            options.ServicePort,
 		memoryPercent:          options.MemoryPercent,
@@ -230,7 +257,42 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return joinContextError(runErrors, err)
 	}
 
+	if len(runErrors) == 0 && batchesHealthy(healthBatch, memoryBatch, diskBatch, tcpBatch, authBatch) && r.healthReporter != nil {
+		highestDisk := 0.0
+		for _, disk := range disks.Disks {
+			if disk.UsedPercent > highestDisk {
+				highestDisk = disk.UsedPercent
+			}
+		}
+		snapshot := HealthSnapshot{
+			MemoryUsedPercent:      memory.UsedPercent,
+			MemoryThreshold:        r.memoryPercent,
+			HighestDiskUsedPercent: highestDisk,
+			DiskMountCount:         len(disks.Disks),
+			DiskThreshold:          r.diskPercent,
+			TotalTCPConnections:    tcp.TotalConnections,
+			TotalTCPThreshold:      r.totalTCPConnections,
+			ServicePort:            r.servicePort,
+			ServicePortConnections: tcp.ServicePortConnections,
+			ServicePortThreshold:   r.servicePortConnections,
+			AccountCount:           len(files),
+		}
+		if err := r.healthReporter.ReportHealthy(ctx, snapshot); err != nil {
+			runErrors = append(runErrors, fmt.Errorf("monitor healthy report: %w", err))
+			r.logger.ErrorContext(ctx, "healthy report failed", "error", err)
+		}
+	}
+
 	return errors.Join(runErrors...)
+}
+
+func batchesHealthy(batches ...rule.Batch) bool {
+	for _, batch := range batches {
+		if !batch.Complete || len(batch.Conditions) != 0 || batch.Err() != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func incompleteBatch(scope string, err error) rule.Batch {

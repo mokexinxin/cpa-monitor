@@ -11,6 +11,7 @@ import (
 	"github.com/mokexinxin/cpa-monitor/internal/cliproxy"
 	"github.com/mokexinxin/cpa-monitor/internal/collector"
 	"github.com/mokexinxin/cpa-monitor/internal/config"
+	"github.com/mokexinxin/cpa-monitor/internal/healthreport"
 	"github.com/mokexinxin/cpa-monitor/internal/logfile"
 	"github.com/mokexinxin/cpa-monitor/internal/mailer"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
@@ -88,10 +89,22 @@ func buildRuntime(cfg config.Config, console io.Writer) (*Runtime, error) {
 		return closeOnError(fmt.Errorf("read host name: %w", err))
 	}
 	manager := alerter.NewManager(sender, store, hostname, cfg.CLIProxy.BaseURL, cfg.Alerts.SendRecovery)
+	healthManager, err := healthreport.New(sender, store, healthreport.Options{
+		Enabled:       cfg.HealthReport.Enabled,
+		Interval:      cfg.HealthReport.Interval.Duration,
+		RetryInterval: cfg.HealthReport.RetryInterval.Duration,
+		Hostname:      hostname,
+		BaseURL:       cfg.CLIProxy.BaseURL,
+		Logger:        logger,
+	})
+	if err != nil {
+		return closeOnError(fmt.Errorf("initialize healthy report manager: %w", err))
+	}
 	runner, err := monitor.NewRunner(monitor.Options{
 		API:                    api,
 		Collector:              collector.NewHostCollector(),
 		Reconciler:             manager,
+		HealthReporter:         healthManager,
 		Logger:                 logger,
 		ServicePort:            servicePort,
 		MemoryPercent:          cfg.Thresholds.MemoryPercent,

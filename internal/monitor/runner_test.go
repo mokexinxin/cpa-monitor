@@ -134,6 +134,64 @@ func TestRunnerHealthFailureIsCompleteDownAndNotRuntimeError(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
+	t.Parallel()
+	reporter := &recordingHealthReporter{}
+	runner := newTestRunner(t, Options{
+		API: &fakeAPI{files: []cliproxy.AuthFile{{AuthIndex: "a"}, {AuthIndex: "b"}}},
+		Collector: &fakeHostCollector{
+			memory: collector.MemoryUsage{UsedPercent: 42.5},
+			disks: collector.DiskBatch{Complete: true, Disks: []collector.DiskUsage{
+				{MountPoint: "/", UsedPercent: 51.2}, {MountPoint: "/data", UsedPercent: 20},
+			}},
+			tcp: collector.TCPUsage{TotalConnections: 4, ServicePortConnections: 2},
+		},
+		HealthReporter: reporter,
+	})
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(reporter.snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(reporter.snapshots))
+	}
+	got := reporter.snapshots[0]
+	if got.MemoryUsedPercent != 42.5 || got.HighestDiskUsedPercent != 51.2 || got.DiskMountCount != 2 || got.TotalTCPConnections != 4 || got.ServicePortConnections != 2 || got.AccountCount != 2 {
+		t.Fatalf("snapshot = %#v", got)
+	}
+}
+
+func TestRunnerSuppressesHealthyReportForConditionOrIncompleteScope(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		api  *fakeAPI
+		host *fakeHostCollector
+	}{
+		{name: "active condition", api: &fakeAPI{healthErr: errors.New("down")}, host: &fakeHostCollector{disks: collector.DiskBatch{Complete: true}}},
+		{name: "incomplete scope", api: &fakeAPI{}, host: &fakeHostCollector{memoryErr: errors.New("unknown"), disks: collector.DiskBatch{Complete: true}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reporter := &recordingHealthReporter{}
+			runner := newTestRunner(t, Options{API: tt.api, Collector: tt.host, HealthReporter: reporter})
+			_ = runner.RunOnce(context.Background())
+			if len(reporter.snapshots) != 0 {
+				t.Fatalf("snapshots = %d, want 0", len(reporter.snapshots))
+			}
+		})
+	}
+}
+
+func TestRunnerReturnsHealthyReportDeliveryError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("healthy SMTP failed")
+	reporter := &recordingHealthReporter{err: sentinel}
+	runner := newTestRunner(t, Options{HealthReporter: reporter})
+	err := runner.RunOnce(context.Background())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+}
+
 func TestRunnerDiskErrorForcesIncompleteWhilePreservingKnownMounts(t *testing.T) {
 	t.Parallel()
 
@@ -351,6 +409,9 @@ func newTestRunner(t *testing.T, overrides Options) *Runner {
 	if overrides.Logger != nil {
 		opts.Logger = overrides.Logger
 	}
+	if overrides.HealthReporter != nil {
+		opts.HealthReporter = overrides.HealthReporter
+	}
 	runner, err := NewRunner(opts)
 	if err != nil {
 		t.Fatalf("NewRunner() error = %v", err)
@@ -477,6 +538,16 @@ type reconcilerFunc func(context.Context, rule.Batch) error
 
 func (f reconcilerFunc) Reconcile(ctx context.Context, batch rule.Batch) error {
 	return f(ctx, batch)
+}
+
+type recordingHealthReporter struct {
+	snapshots []HealthSnapshot
+	err       error
+}
+
+func (r *recordingHealthReporter) ReportHealthy(_ context.Context, snapshot HealthSnapshot) error {
+	r.snapshots = append(r.snapshots, snapshot)
+	return r.err
 }
 
 func (r *recordingReconciler) Reconcile(_ context.Context, batch rule.Batch) error {

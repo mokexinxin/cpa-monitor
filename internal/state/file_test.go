@@ -34,6 +34,13 @@ func TestOpenMissingAndRoundTrip(t *testing.T) {
 	if err := store.Put(want); err != nil {
 		t.Fatal(err)
 	}
+	health := HealthReportState{
+		LastAttemptAt: time.Date(2026, 7, 10, 2, 2, 3, 0, time.FixedZone("CST", 8*60*60)),
+		LastSentAt:    time.Date(2026, 7, 10, 2, 2, 3, 0, time.FixedZone("CST", 8*60*60)),
+	}
+	if err := store.SetHealthReport(health); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +70,48 @@ func TestOpenMissingAndRoundTrip(t *testing.T) {
 	}
 	if got.Details["host"] != "example" {
 		t.Fatalf("details = %#v", got.Details)
+	}
+	gotHealth := reloaded.HealthReport()
+	if !gotHealth.LastSentAt.Equal(health.LastSentAt) || gotHealth.LastSentAt.Location() != time.UTC {
+		t.Fatalf("health report state = %#v", gotHealth)
+	}
+}
+
+func TestOpenMigratesVersionOneState(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "alerts.json")
+	contents := `{"version":1,"active":[{"key":"resource:memory","scope":"memory","activated_at":"2026-07-10T01:02:03Z"}]}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Get("resource:memory"); !ok {
+		t.Fatal("version 1 alert record was not loaded")
+	}
+	if got := store.HealthReport(); !got.LastAttemptAt.IsZero() || !got.LastSentAt.IsZero() {
+		t.Fatalf("migrated health state = %#v", got)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"version": 2`) {
+		t.Fatalf("saved migration = %s", data)
+	}
+}
+
+func TestHealthReportStateValidation(t *testing.T) {
+	t.Parallel()
+	store := New(filepath.Join(t.TempDir(), "alerts.json"))
+	now := time.Now().UTC()
+	if err := store.SetHealthReport(HealthReportState{LastSentAt: now}); err == nil {
+		t.Fatal("missing last attempt should fail")
+	}
+	if err := store.SetHealthReport(HealthReportState{LastAttemptAt: now.Add(-time.Minute), LastSentAt: now}); err == nil {
+		t.Fatal("attempt before sent should fail")
 	}
 }
 

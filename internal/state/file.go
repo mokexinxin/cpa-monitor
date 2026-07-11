@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type Record struct {
 	Key         string            `json:"key"`
@@ -25,9 +25,17 @@ type Record struct {
 	ActivatedAt time.Time         `json:"activated_at"`
 }
 
+// HealthReportState persists delivery scheduling independently from active
+// alert records so daemon restarts do not trigger duplicate healthy emails.
+type HealthReportState struct {
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	LastSentAt    time.Time `json:"last_sent_at,omitempty"`
+}
+
 type document struct {
-	Version int      `json:"version"`
-	Active  []Record `json:"active"`
+	Version      int                `json:"version"`
+	Active       []Record           `json:"active"`
+	HealthReport *HealthReportState `json:"health_report,omitempty"`
 }
 
 type File struct {
@@ -35,6 +43,7 @@ type File struct {
 	saveMu  sync.Mutex
 	path    string
 	records map[string]Record
+	health  HealthReportState
 	save    func(string, []byte) error
 }
 
@@ -83,7 +92,7 @@ func Open(path string) (*File, error) {
 		}
 		return store, fmt.Errorf("decode alert state trailing data: %w", err)
 	}
-	if doc.Version != schemaVersion {
+	if doc.Version != 1 && doc.Version != schemaVersion {
 		return store, fmt.Errorf("unsupported alert state version %d", doc.Version)
 	}
 	for _, record := range doc.Active {
@@ -94,6 +103,12 @@ func Open(path string) (*File, error) {
 			return New(path), fmt.Errorf("duplicate alert state key %q", record.Key)
 		}
 		store.records[record.Key] = cloneRecord(record)
+	}
+	if doc.HealthReport != nil {
+		if err := validateHealthReportState(*doc.HealthReport); err != nil {
+			return New(path), fmt.Errorf("invalid health report state: %w", err)
+		}
+		store.health = normalizeHealthReportState(*doc.HealthReport)
 	}
 	return store, nil
 }
@@ -152,6 +167,22 @@ func (f *File) Delete(key string) bool {
 	return true
 }
 
+func (f *File) HealthReport() HealthReportState {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.health
+}
+
+func (f *File) SetHealthReport(value HealthReportState) error {
+	if err := validateHealthReportState(value); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.health = normalizeHealthReportState(value)
+	return nil
+}
+
 func (f *File) Save() error {
 	f.saveMu.Lock()
 	defer f.saveMu.Unlock()
@@ -161,10 +192,16 @@ func (f *File) Save() error {
 	for _, record := range f.records {
 		records = append(records, cloneRecord(record))
 	}
+	health := f.health
 	f.mu.RUnlock()
 
 	sort.Slice(records, func(i, j int) bool { return records[i].Key < records[j].Key })
-	data, err := json.MarshalIndent(document{Version: schemaVersion, Active: records}, "", "  ")
+	doc := document{Version: schemaVersion, Active: records}
+	if !health.LastAttemptAt.IsZero() || !health.LastSentAt.IsZero() {
+		health = normalizeHealthReportState(health)
+		doc.HealthReport = &health
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode alert state: %w", err)
 	}
@@ -183,6 +220,26 @@ func validateRecord(record Record) error {
 		return errors.New("alert state scope is required")
 	}
 	return nil
+}
+
+func validateHealthReportState(value HealthReportState) error {
+	if !value.LastSentAt.IsZero() && value.LastAttemptAt.IsZero() {
+		return errors.New("last attempt time is required when last sent time is set")
+	}
+	if !value.LastAttemptAt.IsZero() && value.LastAttemptAt.Before(value.LastSentAt) {
+		return errors.New("last attempt time must not be before last sent time")
+	}
+	return nil
+}
+
+func normalizeHealthReportState(value HealthReportState) HealthReportState {
+	if !value.LastAttemptAt.IsZero() {
+		value.LastAttemptAt = value.LastAttemptAt.UTC()
+	}
+	if !value.LastSentAt.IsZero() {
+		value.LastSentAt = value.LastSentAt.UTC()
+	}
+	return value
 }
 
 func cloneRecord(record Record) Record {

@@ -14,7 +14,9 @@ It checks:
 
 Alerts are sent through SMTP once when a condition becomes unhealthy. The
 same key is suppressed until it recovers. Optional recovery mail can be
-enabled.
+enabled. Scheduled health reports can also confirm that every monitoring scope
+is working and healthy; all emails include an HTML view and a plain-text
+fallback.
 
 ## Quick install (Linux)
 
@@ -28,7 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstr
 The bootstrap verifies the release SHA-256 checksum, opens the interactive
 configuration prompts, installs the systemd units, and starts
 `cpa-monitor.service`. The server needs systemd, `curl`, and `flock`; Go is not
-required.
+required. New generated installations enable a daily health email by default;
+the first fully healthy cycle sends one immediately, which also verifies the
+SMTP configuration end to end.
 
 After installation:
 
@@ -116,6 +120,9 @@ addresses. The important defaults are:
 | `thresholds.service_port_connections` | `800` |
 | `alerts.send_recovery` | `false` |
 | `alerts.state_file` | `state/alerts.json` |
+| `health_report.enabled` | `false` for omitted/existing configs; installer default `true` |
+| `health_report.interval` | `24h` |
+| `health_report.retry_interval` | `15m` |
 | `smtp.port` | `587` |
 | `smtp.starttls` | `true` |
 | `smtp.timeout` | `10s` |
@@ -162,6 +169,42 @@ smtp:
   starttls: false
   tls: true
 ```
+
+### Scheduled health email
+
+Enable periodic health reports with:
+
+```yaml
+health_report:
+  enabled: true
+  interval: 24h
+  retry_interval: 15m
+```
+
+A report is eligible only after all five scopes—CLIProxyAPI health, memory,
+disk, TCP, and accounts—finish successfully with no active condition. The
+first eligible cycle sends immediately. Later reports follow `interval`; a
+failed SMTP attempt waits for `retry_interval` before retrying. Delivery times
+are stored with alert state, so restarting the service does not send a
+duplicate message.
+
+The HTML report uses an email-client-safe responsive card layout, high-contrast
+status labels, and escaped dynamic content. A plain-text alternative is always
+included. Alert and recovery emails use the same multipart HTML/text format.
+
+To enable it on an existing systemd installation:
+
+```sh
+sudoedit /etc/cpa-monitor/config.yaml
+sudo systemctl start cpa-monitor-check.service
+sudo systemctl restart cpa-monitor.service
+sudo journalctl -u cpa-monitor.service -n 100 --no-pager
+```
+
+After the restart, wait for a complete healthy cycle. The first health email
+should arrive immediately; if any scope is unhealthy or unknown, CPA Monitor
+suppresses the health message instead of reporting a false success. A
+successful delivery writes `healthy report sent` to the journal.
 
 ### Account rules
 
@@ -261,8 +304,8 @@ To audit or pin what is executed, inspect `bootstrap.sh` first or set
 `CPA_MONITOR_VERSION` to a release tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.1.0/bootstrap.sh | \
-  sudo env CPA_MONITOR_VERSION=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.2.0/bootstrap.sh | \
+  sudo env CPA_MONITOR_VERSION=v0.2.0 bash
 ```
 
 For an installation from a local source checkout, install Go 1.26 or newer and
@@ -319,6 +362,10 @@ For CI/provisioning tools, the script can instead generate both files from
 `CPA_MONITOR_*` environment variables. `./install.sh --help` lists every
 supported variable. Pass secrets through the tool's secret environment, never
 as installer arguments.
+
+Health-report installer defaults can be overridden with
+`CPA_MONITOR_HEALTH_REPORT_ENABLED`, `CPA_MONITOR_HEALTH_REPORT_INTERVAL`, and
+`CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL`.
 
 ### Installed paths and upgrades
 
