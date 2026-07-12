@@ -69,11 +69,12 @@ type HealthReportConfig struct {
 	RetryInterval Duration `yaml:"retry_interval"`
 }
 
-// SMTPConfig controls authenticated SMTP delivery. Exactly one of StartTLS and
-// TLS must be enabled; plaintext SMTP is deliberately unsupported.
+// SMTPConfig controls localized authenticated SMTP delivery. Exactly one of
+// StartTLS and TLS must be enabled; plaintext SMTP is deliberately unsupported.
 type SMTPConfig struct {
 	Host        string   `yaml:"host"`
 	Port        int      `yaml:"port"`
+	Language    string   `yaml:"language"`
 	Username    string   `yaml:"username"`
 	UsernameEnv string   `yaml:"username_env"`
 	Password    string   `yaml:"password"`
@@ -125,6 +126,7 @@ func Default() Config {
 		},
 		SMTP: SMTPConfig{
 			Port:     587,
+			Language: "zh-CN",
 			StartTLS: true,
 			Timeout:  Duration{Duration: 10 * time.Second},
 		},
@@ -206,6 +208,9 @@ func (c Config) Validate() error {
 	}
 	if c.SMTP.Timeout.Duration <= 0 {
 		return errors.New("smtp.timeout must be greater than zero")
+	}
+	if c.SMTP.Language != "zh-CN" && c.SMTP.Language != "en" {
+		return errors.New("smtp.language must be zh-CN or en")
 	}
 	if err := validatePercent("thresholds.memory_percent", c.Thresholds.MemoryPercent); err != nil {
 		return err

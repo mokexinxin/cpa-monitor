@@ -56,6 +56,9 @@ func TestLoadAppliesDocumentedDefaults(t *testing.T) {
 	if got, want := cfg.SMTP.Port, 587; got != want {
 		t.Errorf("SMTP.Port = %d, want %d", got, want)
 	}
+	if got, want := cfg.SMTP.Language, "zh-CN"; got != want {
+		t.Errorf("SMTP.Language = %q, want %q", got, want)
+	}
 	if got, want := cfg.SMTP.Timeout.Duration, 10*time.Second; got != want {
 		t.Errorf("SMTP.Timeout = %v, want %v", got, want)
 	}
@@ -92,6 +95,7 @@ cliproxy:
   timeout: 1500ms
 smtp:
   host: smtp.example.com
+  language: en
   from: monitor@example.com
   to: [ops@example.com]
   timeout: 3m
@@ -108,6 +112,9 @@ smtp:
 	}
 	if got, want := cfg.SMTP.Timeout.Duration, 3*time.Minute; got != want {
 		t.Errorf("SMTP.Timeout = %v, want %v", got, want)
+	}
+	if got, want := cfg.SMTP.Language, "en"; got != want {
+		t.Errorf("SMTP.Language = %q, want %q", got, want)
 	}
 }
 
@@ -326,6 +333,7 @@ func TestValidation(t *testing.T) {
 		{name: "both TLS modes", yaml: baseYAML("smtp:\n  host: smtp.example.com\n  from: monitor@example.com\n  to: [ops@example.com]\n  starttls: true\n  tls: true"), wantInErr: "exactly one"},
 		{name: "neither TLS mode", yaml: baseYAML("smtp:\n  host: smtp.example.com\n  from: monitor@example.com\n  to: [ops@example.com]\n  starttls: false\n  tls: false"), wantInErr: "exactly one"},
 		{name: "bad SMTP port", yaml: baseYAML("smtp:\n  host: smtp.example.com\n  port: 0\n  from: monitor@example.com\n  to: [ops@example.com]"), wantInErr: "smtp.port"},
+		{name: "bad SMTP language", yaml: baseYAML("smtp:\n  host: smtp.example.com\n  language: fr\n  from: monitor@example.com\n  to: [ops@example.com]"), wantInErr: "smtp.language"},
 		{name: "unknown log level", yaml: baseYAML("logging:\n  level: verbose"), wantInErr: "logging.level"},
 		{name: "enabled empty path", yaml: baseYAML("logging:\n  file:\n    enabled: true\n    path: ''"), wantInErr: "logging.file.path"},
 		{name: "enabled zero max size", yaml: baseYAML("logging:\n  file:\n    enabled: true\n    max_size_mb: 0"), wantInErr: "max_size_mb"},

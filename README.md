@@ -32,7 +32,7 @@ configuration prompts, installs the systemd units, and starts
 `cpa-monitor.service`. The server needs systemd, `curl`, and `flock`; Go is not
 required. New generated installations enable a daily health email by default;
 the first fully healthy cycle sends one immediately, which also verifies the
-SMTP configuration end to end.
+SMTP configuration end to end. Email content defaults to Simplified Chinese.
 
 After installation:
 
@@ -124,6 +124,7 @@ addresses. The important defaults are:
 | `health_report.interval` | `24h` |
 | `health_report.retry_interval` | `15m` |
 | `smtp.port` | `587` |
+| `smtp.language` | `zh-CN` |
 | `smtp.starttls` | `true` |
 | `smtp.timeout` | `10s` |
 | `logging.file.enabled` | `false` |
@@ -168,6 +169,33 @@ smtp:
   port: 465
   starttls: false
   tls: true
+```
+
+### Email language
+
+Alert, recovery, and health emails support Simplified Chinese and English.
+Chinese is the default when `language` is omitted:
+
+```yaml
+smtp:
+  language: zh-CN  # Chinese
+```
+
+To use English instead:
+
+```yaml
+smtp:
+  language: en
+```
+
+The selected language applies to subjects, status labels, metric names,
+plain-text fields, HTML content, and footers. Technical key/value details are
+kept unchanged for troubleshooting. After changing it on an installed server,
+validate and restart:
+
+```sh
+sudo systemctl start cpa-monitor-check.service
+sudo systemctl restart cpa-monitor.service
 ```
 
 ### Scheduled health email
@@ -304,8 +332,8 @@ To audit or pin what is executed, inspect `bootstrap.sh` first or set
 `CPA_MONITOR_VERSION` to a release tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.2.0/bootstrap.sh | \
-  sudo env CPA_MONITOR_VERSION=v0.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.3.0/bootstrap.sh | \
+  sudo env CPA_MONITOR_VERSION=v0.3.0 bash
 ```
 
 For an installation from a local source checkout, install Go 1.26 or newer and
@@ -365,7 +393,8 @@ as installer arguments.
 
 Health-report installer defaults can be overridden with
 `CPA_MONITOR_HEALTH_REPORT_ENABLED`, `CPA_MONITOR_HEALTH_REPORT_INTERVAL`, and
-`CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL`.
+`CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL`. Set generated email language with
+`CPA_MONITOR_EMAIL_LANGUAGE=zh-CN` or `CPA_MONITOR_EMAIL_LANGUAGE=en`.
 
 ### Installed paths and upgrades
 

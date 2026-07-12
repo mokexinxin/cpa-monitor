@@ -93,6 +93,7 @@ First-install automation variables:
   CPA_MONITOR_SMTP_MODE            starttls (default) or tls
   CPA_MONITOR_SMTP_USERNAME        optional; requires matching password
   CPA_MONITOR_SMTP_PASSWORD        optional; requires matching username
+  CPA_MONITOR_EMAIL_LANGUAGE       zh-CN (default) or en
   CPA_MONITOR_HEALTH_REPORT_ENABLED        default true
   CPA_MONITOR_HEALTH_REPORT_INTERVAL       default 24h
   CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL default 15m
@@ -434,6 +435,7 @@ load_generation_values() {
     SMTP_FROM="${CPA_MONITOR_SMTP_FROM:-}"
     SMTP_TO_CSV="${CPA_MONITOR_SMTP_TO:-}"
     SMTP_MODE="${CPA_MONITOR_SMTP_MODE:-starttls}"
+    EMAIL_LANGUAGE="${CPA_MONITOR_EMAIL_LANGUAGE:-zh-CN}"
     SMTP_USERNAME="${CPA_MONITOR_SMTP_USERNAME:-}"
     SMTP_PASSWORD="${CPA_MONITOR_SMTP_PASSWORD:-}"
     MANAGEMENT_KEY="${CPA_MONITOR_MANAGEMENT_KEY:-}"
@@ -445,6 +447,8 @@ collect_interactive_values() {
         BASE_URL="$PROMPT_RESULT"
         prompt_plain "Monitor interval" "$MONITOR_INTERVAL"
         MONITOR_INTERVAL="$PROMPT_RESULT"
+        prompt_plain "Email language (zh-CN/en)" "$EMAIL_LANGUAGE"
+        EMAIL_LANGUAGE="$PROMPT_RESULT"
         prompt_plain "Enable periodic healthy email (true/false)" "$HEALTH_REPORT_ENABLED"
         HEALTH_REPORT_ENABLED="$PROMPT_RESULT"
         if [[ "$HEALTH_REPORT_ENABLED" == "true" ]]; then
@@ -506,6 +510,7 @@ validate_generation_values() {
         reject_line_breaks "CPA_MONITOR_SMTP_HOST" "$SMTP_HOST"
         reject_line_breaks "CPA_MONITOR_SMTP_FROM" "$SMTP_FROM"
         validate_monitor_duration "$MONITOR_INTERVAL" "CPA_MONITOR_INTERVAL"
+        [[ "$EMAIL_LANGUAGE" == "zh-CN" || "$EMAIL_LANGUAGE" == "en" ]] || die "CPA_MONITOR_EMAIL_LANGUAGE must be zh-CN or en"
         validate_bool "CPA_MONITOR_HEALTH_REPORT_ENABLED" "$HEALTH_REPORT_ENABLED"
         validate_monitor_duration "$HEALTH_REPORT_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_INTERVAL"
         validate_monitor_duration "$HEALTH_REPORT_RETRY_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL"
@@ -580,6 +585,7 @@ health_report:
 smtp:
   host: $(yaml_quote "$SMTP_HOST")
   port: ${SMTP_PORT}
+  language: $(yaml_quote "$EMAIL_LANGUAGE")
   username: ''
   username_env: CPA_SMTP_USERNAME
   password: ''

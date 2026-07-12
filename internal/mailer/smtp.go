@@ -19,6 +19,7 @@ import (
 type Config struct {
 	Host      string
 	Port      int
+	Language  string
 	Username  string
 	Password  string
 	From      string
@@ -41,6 +42,9 @@ type Mailer struct {
 // New validates and copies a mailer configuration. Plaintext SMTP is not
 // supported, including when authentication is disabled.
 func New(config Config) (*Mailer, error) {
+	if config.Language == "" {
+		config.Language = "zh-CN"
+	}
 	if !validSMTPHost(config.Host) {
 		return nil, fmt.Errorf("SMTP host is invalid")
 	}
@@ -62,6 +66,9 @@ func New(config Config) (*Mailer, error) {
 	}
 	if config.Timeout <= 0 {
 		return nil, fmt.Errorf("SMTP timeout must be greater than zero")
+	}
+	if !validLanguage(config.Language) {
+		return nil, fmt.Errorf("SMTP language must be zh-CN or en")
 	}
 
 	tlsConfig := &tls.Config{}
@@ -99,7 +106,7 @@ func (m *Mailer) Send(ctx context.Context, event Event) error {
 	if ctx == nil {
 		return fmt.Errorf("SMTP context must not be nil")
 	}
-	message, err := BuildMessage(m.config.From, m.config.To, event)
+	message, err := BuildMessageInLanguage(m.config.From, m.config.To, event, m.config.Language)
 	if err != nil {
 		return err
 	}
@@ -111,7 +118,7 @@ func (m *Mailer) SendHealth(ctx context.Context, report HealthReport) error {
 	if ctx == nil {
 		return fmt.Errorf("SMTP context must not be nil")
 	}
-	message, err := BuildHealthMessage(m.config.From, m.config.To, report)
+	message, err := BuildHealthMessageInLanguage(m.config.From, m.config.To, report, m.config.Language)
 	if err != nil {
 		return err
 	}

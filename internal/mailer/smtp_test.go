@@ -62,6 +62,7 @@ func TestNewValidatesSMTPConfig(t *testing.T) {
 		{name: "plaintext", mutate: func(c *Config) { c.StartTLS = false }},
 		{name: "both TLS modes", mutate: func(c *Config) { c.DirectTLS = true }},
 		{name: "zero timeout", mutate: func(c *Config) { c.Timeout = 0 }},
+		{name: "invalid language", mutate: func(c *Config) { c.Language = "fr" }},
 		{name: "insecure TLS", mutate: func(c *Config) {
 			c.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec -- verifies rejection.
 		}},
@@ -84,6 +85,21 @@ func TestNewValidatesSMTPConfig(t *testing.T) {
 	}
 }
 
+func TestNewDefaultsLanguageToChinese(t *testing.T) {
+	t.Parallel()
+	config := Config{
+		Host: "smtp.example.test", Port: 587, From: "monitor@example.test",
+		To: []string{"admin@example.test"}, StartTLS: true, Timeout: time.Second,
+	}
+	client, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.config.Language != LanguageChinese {
+		t.Fatalf("language = %q, want %q", client.config.Language, LanguageChinese)
+	}
+}
+
 func TestSendDeliversOverVerifiedTLS(t *testing.T) {
 	for _, tt := range []struct {
 		name      string
@@ -99,6 +115,7 @@ func TestSendDeliversOverVerifiedTLS(t *testing.T) {
 			defer server.closeAndCheck(t)
 
 			cfg := server.clientConfig()
+			cfg.Language = LanguageEnglish
 			cfg.From = "CPA Monitor <monitor@example.test>"
 			cfg.To = []string{"one@example.test", "Admin Two <two@example.test>"}
 			if tt.auth {
@@ -155,7 +172,9 @@ func TestSendDeliversOverVerifiedTLS(t *testing.T) {
 func TestSendHealthDeliversMultipartReport(t *testing.T) {
 	server := newFakeSMTPServer(t, fakeSMTPOptions{})
 	defer server.closeAndCheck(t)
-	client, err := New(server.clientConfig())
+	config := server.clientConfig()
+	config.Language = LanguageEnglish
+	client, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}

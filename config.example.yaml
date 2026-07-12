@@ -28,6 +28,8 @@ health_report:
 smtp:
   host: smtp.example.com
   port: 587
+  # zh-CN (default) or en. Applies to alert, recovery, and health emails.
+  language: zh-CN
   username: ""
   username_env: CPA_SMTP_USERNAME
   password: ""

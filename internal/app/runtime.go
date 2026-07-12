@@ -65,6 +65,7 @@ func buildRuntime(cfg config.Config, console io.Writer) (*Runtime, error) {
 	sender, err := mailer.New(mailer.Config{
 		Host:      cfg.SMTP.Host,
 		Port:      cfg.SMTP.Port,
+		Language:  cfg.SMTP.Language,
 		Username:  cfg.SMTP.Username,
 		Password:  cfg.SMTP.Password,
 		From:      cfg.SMTP.From,

@@ -24,7 +24,7 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 		Key:       "auth:account-7",
 		Current:   "unavailable",
 		Threshold: "active",
-		Details:   "provider=codex\nstatus_message=额度已耗尽",
+		Details:   "email=codex-user@example.com\nprovider=codex\nstatus_message=额度已耗尽",
 		BaseURL:   "http://127.0.0.1:8317",
 	}
 
@@ -74,7 +74,7 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode Subject: %v", err)
 	}
-	if got, want := decodedSubject, "[CPA Monitor] ALERT "+event.Object; got != want {
+	if got, want := decodedSubject, "[CPA Monitor] 告警：账号 codex-user@example.com 状态：不可用"; got != want {
 		t.Fatalf("Subject = %q, want %q", got, want)
 	}
 	if !strings.Contains(string(raw), "=?utf-8?") && !strings.Contains(string(raw), "=?UTF-8?") {
@@ -84,21 +84,21 @@ func TestBuildMessageCreatesRFCMessage(t *testing.T) {
 	parts := readAlternative(t, msg)
 	body := parts["text/plain"]
 	for _, want := range []string{
-		"Event: ALERT",
-		"Host: monitor-01",
-		"Timestamp: 2026-07-08T19:04:05Z",
-		"Alert key: auth:account-7",
-		"Current: unavailable",
-		"Threshold: active",
-		"Details:\r\nprovider=codex\r\nstatus_message=额度已耗尽",
-		"CLIProxyAPI base URL: http://127.0.0.1:8317",
+		"事件: 告警",
+		"主机: monitor-01",
+		"时间: 2026-07-08T19:04:05Z",
+		"告警键: auth:account-7",
+		"当前值: 不可用",
+		"阈值: 活动",
+		"技术详情:\r\nemail=codex-user@example.com\r\nprovider=codex\r\nstatus_message=额度已耗尽",
+		"CLIProxyAPI 地址: http://127.0.0.1:8317",
 	} {
 		if !bytes.Contains(body, []byte(want)) {
 			t.Errorf("body does not contain %q:\n%s", want, body)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"CPA MONITOR", "ALERT", "monitor-01", "auth:account-7", "CLIProxyAPI"} {
+	for _, want := range []string{"CPA MONITOR", "告警", "monitor-01", "auth:account-7", "CLIProxyAPI"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -122,18 +122,18 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decodedSubject != "[CPA Monitor] HEALTHY "+report.Hostname {
+	if decodedSubject != "[CPA Monitor] 健康报告："+report.Hostname {
 		t.Fatalf("Subject = %q", decodedSubject)
 	}
 	parts := readAlternative(t, msg)
 	plain := string(parts["text/plain"])
-	for _, want := range []string{"Status: HEALTHY - all checks passed", "Memory: 42.5% used", "Service port 8317: 11 connections", "Accounts: 3 checked"} {
+	for _, want := range []string{"状态: 健康 - 所有检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已检查 3 个"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain body does not contain %q:\n%s", want, plain)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"HEALTHY", "All systems are operating normally", "Memory", "Highest disk", "Total TCP", "Port 8317", "Next scheduled report"} {
+	for _, want := range []string{"健康", "所有系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "下次计划报告"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -141,8 +141,11 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	if strings.Contains(htmlBody, `<script>alert`) || !strings.Contains(htmlBody, `&lt;script&gt;`) {
 		t.Fatalf("dynamic hostname was not HTML escaped:\n%s", htmlBody)
 	}
-	if !strings.Contains(htmlBody, "#166534") || !strings.Contains(htmlBody, "HEALTHY") {
+	if !strings.Contains(htmlBody, "#166534") || !strings.Contains(htmlBody, "健康") {
 		t.Fatal("health status must use both visible text and accessible high-contrast color")
+	}
+	if !strings.Contains(htmlBody, `<html lang="zh-CN">`) {
+		t.Fatal("Chinese HTML language metadata is missing")
 	}
 }
 
@@ -160,8 +163,60 @@ func TestBuildMessageRecoverySubject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mail.ReadMessage() error = %v", err)
 	}
-	if got, want := msg.Header.Get("Subject"), "[CPA Monitor] RECOVERY disk / recovered"; got != want {
+	decodedSubject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := decodedSubject, "[CPA Monitor] 恢复：内存使用率已恢复"; got != want {
 		t.Fatalf("Subject = %q, want %q", got, want)
+	}
+}
+
+func TestBuildMessagesInEnglish(t *testing.T) {
+	t.Parallel()
+	raw, err := BuildMessageInLanguage("monitor@example.com", []string{"admin@example.com"}, validEvent(), LanguageEnglish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := msg.Header.Get("Subject"), "[CPA Monitor] ALERT memory usage 84.2% on host"; got != want {
+		t.Fatalf("Subject = %q, want %q", got, want)
+	}
+	parts := readAlternative(t, msg)
+	if !strings.Contains(string(parts["text/plain"]), "Event: ALERT") || !strings.Contains(string(parts["text/html"]), "Details") {
+		t.Fatal("English alert message was not localized")
+	}
+
+	raw, err = BuildHealthMessageInLanguage("monitor@example.com", []string{"admin@example.com"}, validHealthReport(), LanguageEnglish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err = mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := msg.Header.Get("Subject"), "[CPA Monitor] HEALTHY monitor-01"; got != want {
+		t.Fatalf("Subject = %q, want %q", got, want)
+	}
+	parts = readAlternative(t, msg)
+	if !strings.Contains(string(parts["text/plain"]), "Status: HEALTHY - all checks passed") || !strings.Contains(string(parts["text/html"]), "All systems are operating normally") {
+		t.Fatal("English health message was not localized")
+	}
+	if !strings.Contains(string(parts["text/html"]), `<html lang="en">`) {
+		t.Fatal("English HTML language metadata is missing")
+	}
+}
+
+func TestBuildMessagesRejectUnsupportedLanguage(t *testing.T) {
+	t.Parallel()
+	if _, err := BuildMessageInLanguage("monitor@example.com", []string{"admin@example.com"}, validEvent(), "fr"); err == nil {
+		t.Fatal("alert message accepted unsupported language")
+	}
+	if _, err := BuildHealthMessageInLanguage("monitor@example.com", []string{"admin@example.com"}, validHealthReport(), "fr"); err == nil {
+		t.Fatal("health message accepted unsupported language")
 	}
 }
 
@@ -184,6 +239,11 @@ func TestBuildMessageRejectsHeaderInjection(t *testing.T) {
 		{name: "subject tab", from: "monitor@example.com", to: []string{"admin@example.com"}, event: func() Event {
 			e := validEvent()
 			e.Object = "memory\tusage"
+			return e
+		}()},
+		{name: "localized key", from: "monitor@example.com", to: []string{"admin@example.com"}, event: func() Event {
+			e := validEvent()
+			e.Key = "resource:disk:/\r\nBcc: stolen@example.com"
 			return e
 		}()},
 	}

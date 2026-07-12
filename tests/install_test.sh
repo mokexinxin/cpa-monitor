@@ -418,6 +418,7 @@ test_staged_first_install_and_daemon_activation() {
     assert_contains "${root}/etc/cpa-monitor/config.yaml" '  enabled: true'
     assert_contains "${root}/etc/cpa-monitor/config.yaml" "  interval: '24h'"
     assert_contains "${root}/etc/cpa-monitor/config.yaml" "  retry_interval: '15m'"
+    assert_contains "${root}/etc/cpa-monitor/config.yaml" "  language: 'zh-CN'"
     assert_contains "${root}/etc/cpa-monitor/config.yaml" 'path: /var/log/cpa-monitor/monitor.log'
     assert_contains "${root}/etc/cpa-monitor/config.yaml" "- 'ops@example.com'"
     assert_not_contains "${root}/etc/cpa-monitor/config.yaml" 'first-management-key'
@@ -686,15 +687,19 @@ test_invalid_and_missing_input_leave_no_files() {
     local binary
     local missing_root
     local invalid_root
+    local invalid_language_root
     local missing_output
     local invalid_output
+    local invalid_language_output
     local status
     case_dir="$(new_case_dir)"
     binary="${case_dir}/cpa-monitor"
     missing_root="${case_dir}/missing-root"
     invalid_root="${case_dir}/invalid-root"
+    invalid_language_root="${case_dir}/invalid-language-root"
     missing_output="${case_dir}/missing.out"
     invalid_output="${case_dir}/invalid.out"
+    invalid_language_output="${case_dir}/invalid-language.out"
     make_fake_binary "$binary" validation
 
     set +e
@@ -726,6 +731,24 @@ test_invalid_and_missing_input_leave_no_files() {
     assert_nonzero "$status" "remote plaintext HTTP should fail"
     assert_contains "$invalid_output" 'must use HTTPS for a non-loopback host'
     assert_not_exists "$invalid_root"
+
+    set +e
+    clean_env \
+        CPA_MONITOR_MANAGEMENT_KEY='valid-key' \
+        CPA_MONITOR_EMAIL_LANGUAGE='fr' \
+        CPA_MONITOR_SMTP_HOST='smtp.example.com' \
+        CPA_MONITOR_SMTP_FROM='monitor@example.com' \
+        CPA_MONITOR_SMTP_TO='ops@example.com' \
+        "$BASH_BIN" "$INSTALLER" \
+        --root "$invalid_language_root" \
+        --binary "$binary" \
+        --non-interactive \
+        --no-start >"$invalid_language_output" 2>&1
+    status=$?
+    set -e
+    assert_nonzero "$status" "invalid email language should fail"
+    assert_contains "$invalid_language_output" 'CPA_MONITOR_EMAIL_LANGUAGE must be zh-CN or en'
+    assert_not_exists "$invalid_language_root"
 }
 
 test_systemctl_failure_rolls_back_files() {

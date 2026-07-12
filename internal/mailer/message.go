@@ -55,23 +55,39 @@ type HealthReport struct {
 }
 
 // BuildMessage constructs a multipart alert or recovery message with both
-// plain-text and HTML alternatives.
+// plain-text and HTML alternatives in the default Chinese language.
 func BuildMessage(from string, to []string, event Event) ([]byte, error) {
+	return BuildMessageInLanguage(from, to, event, LanguageChinese)
+}
+
+// BuildMessageInLanguage constructs a localized alert or recovery message.
+func BuildMessageInLanguage(from string, to []string, event Event, language string) ([]byte, error) {
+	if !validLanguage(language) {
+		return nil, fmt.Errorf("mail language must be zh-CN or en")
+	}
 	if err := validateEvent(event); err != nil {
 		return nil, err
 	}
 	timestamp := event.Timestamp.UTC()
 	var plain strings.Builder
-	writeBodyField(&plain, "Event", string(event.Kind))
-	writeBodyField(&plain, "Host", event.Hostname)
-	writeBodyField(&plain, "Timestamp", timestamp.Format(time.RFC3339))
-	writeBodyField(&plain, "Alert key", event.Key)
-	writeBodyField(&plain, "Current", event.Current)
-	writeBodyField(&plain, "Threshold", event.Threshold)
-	plain.WriteString("Details:\r\n")
+	kind := localizedKind(event.Kind, language)
+	object := localizedObject(event, language)
+	labels := alertLabels(language)
+	writeBodyField(&plain, labels.event, kind)
+	writeBodyField(&plain, labels.host, event.Hostname)
+	writeBodyField(&plain, labels.timestamp, timestamp.Format(time.RFC3339))
+	writeBodyField(&plain, labels.key, event.Key)
+	current := localizedCurrent(event.Current, language)
+	if language == LanguageChinese && event.Kind == Recovery {
+		current = "已恢复"
+	}
+	writeBodyField(&plain, labels.current, current)
+	threshold := localizedThreshold(event.Threshold, language)
+	writeBodyField(&plain, labels.threshold, threshold)
+	plain.WriteString(labels.details + ":\r\n")
 	plain.WriteString(normalizeCRLF(event.Details))
 	plain.WriteString("\r\n")
-	writeBodyField(&plain, "CLIProxyAPI base URL", event.BaseURL)
+	writeBodyField(&plain, labels.baseURL, event.BaseURL)
 
 	statusColor := "#b42318"
 	statusBackground := "#fee4e2"
@@ -81,32 +97,63 @@ func BuildMessage(from string, to []string, event Event) ([]byte, error) {
 		statusBackground = "#dcfce7"
 		statusBorder = "#bbf7d0"
 	}
-	body := renderAlertHTML(event, timestamp, statusColor, statusBackground, statusBorder)
-	return buildAlternative(from, to, timestamp, "[CPA Monitor] "+string(event.Kind)+" "+event.Object, plain.String(), body)
+	body := renderAlertHTML(event, timestamp, statusColor, statusBackground, statusBorder, language, kind, object, current, threshold)
+	subject := "[CPA Monitor] " + string(event.Kind) + " " + event.Object
+	if language == LanguageChinese {
+		subject = "[CPA Monitor] " + kind + "：" + object
+	}
+	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
 }
 
 // BuildHealthMessage constructs the scheduled healthy-status report.
 func BuildHealthMessage(from string, to []string, report HealthReport) ([]byte, error) {
+	return BuildHealthMessageInLanguage(from, to, report, LanguageChinese)
+}
+
+// BuildHealthMessageInLanguage constructs a localized healthy-status report.
+func BuildHealthMessageInLanguage(from string, to []string, report HealthReport, language string) ([]byte, error) {
+	if !validLanguage(language) {
+		return nil, fmt.Errorf("mail language must be zh-CN or en")
+	}
 	if err := validateHealthReport(report); err != nil {
 		return nil, err
 	}
 	timestamp := report.Timestamp.UTC()
 	var plain strings.Builder
-	plain.WriteString("CPA Monitor health report\r\n\r\n")
-	writeBodyField(&plain, "Status", "HEALTHY - all checks passed")
-	writeBodyField(&plain, "Host", report.Hostname)
-	writeBodyField(&plain, "Checked at", timestamp.Format(time.RFC3339))
-	writeBodyField(&plain, "CLIProxyAPI", "reachable")
-	writeBodyField(&plain, "Memory", fmt.Sprintf("%.1f%% used (alert at %.1f%%)", report.MemoryUsedPercent, report.MemoryThreshold))
-	writeBodyField(&plain, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (alert at %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
-	writeBodyField(&plain, "TCP", fmt.Sprintf("%d total (alert at %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
-	writeBodyField(&plain, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (alert at %d)", report.ServicePortConnections, report.ServicePortThreshold))
-	writeBodyField(&plain, "Accounts", fmt.Sprintf("%d checked", report.AccountCount))
-	writeBodyField(&plain, "CLIProxyAPI base URL", report.BaseURL)
-	writeBodyField(&plain, "Next scheduled report", report.NextScheduledAt.UTC().Format(time.RFC3339))
+	if language == LanguageChinese {
+		plain.WriteString("CPA Monitor 健康报告\r\n\r\n")
+		writeBodyField(&plain, "状态", "健康 - 所有检查均已通过")
+		writeBodyField(&plain, "主机", report.Hostname)
+		writeBodyField(&plain, "检查时间", timestamp.Format(time.RFC3339))
+		writeBodyField(&plain, "CLIProxyAPI", "可访问")
+		writeBodyField(&plain, "内存", fmt.Sprintf("已使用 %.1f%%（告警阈值 %.1f%%）", report.MemoryUsedPercent, report.MemoryThreshold))
+		writeBodyField(&plain, "磁盘", fmt.Sprintf("%d 个挂载点中最高使用率 %.1f%%（告警阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
+		writeBodyField(&plain, "TCP", fmt.Sprintf("共 %d 个连接（告警阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
+		writeBodyField(&plain, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（告警阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
+		writeBodyField(&plain, "账号", fmt.Sprintf("已检查 %d 个", report.AccountCount))
+		writeBodyField(&plain, "CLIProxyAPI 地址", report.BaseURL)
+		writeBodyField(&plain, "下次计划报告", report.NextScheduledAt.UTC().Format(time.RFC3339))
+	} else {
+		plain.WriteString("CPA Monitor health report\r\n\r\n")
+		writeBodyField(&plain, "Status", "HEALTHY - all checks passed")
+		writeBodyField(&plain, "Host", report.Hostname)
+		writeBodyField(&plain, "Checked at", timestamp.Format(time.RFC3339))
+		writeBodyField(&plain, "CLIProxyAPI", "reachable")
+		writeBodyField(&plain, "Memory", fmt.Sprintf("%.1f%% used (alert at %.1f%%)", report.MemoryUsedPercent, report.MemoryThreshold))
+		writeBodyField(&plain, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (alert at %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
+		writeBodyField(&plain, "TCP", fmt.Sprintf("%d total (alert at %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
+		writeBodyField(&plain, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (alert at %d)", report.ServicePortConnections, report.ServicePortThreshold))
+		writeBodyField(&plain, "Accounts", fmt.Sprintf("%d checked", report.AccountCount))
+		writeBodyField(&plain, "CLIProxyAPI base URL", report.BaseURL)
+		writeBodyField(&plain, "Next scheduled report", report.NextScheduledAt.UTC().Format(time.RFC3339))
+	}
 
-	body := renderHealthHTML(report)
-	return buildAlternative(from, to, timestamp, "[CPA Monitor] HEALTHY "+report.Hostname, plain.String(), body)
+	body := renderHealthHTML(report, language)
+	subject := "[CPA Monitor] HEALTHY " + report.Hostname
+	if language == LanguageChinese {
+		subject = "[CPA Monitor] 健康报告：" + report.Hostname
+	}
+	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
 }
 
 func buildAlternative(from string, to []string, timestamp time.Time, subject, plain, htmlBody string) ([]byte, error) {
@@ -160,51 +207,80 @@ func writePart(message *strings.Builder, boundary, contentType, body string) err
 	return nil
 }
 
-func renderAlertHTML(event Event, timestamp time.Time, color, background, border string) string {
-	return emailShell(string(event.Kind)+" · CPA Monitor", fmt.Sprintf(`
+type localizedAlertLabels struct {
+	event, host, timestamp, key, current, threshold, details, baseURL string
+}
+
+func alertLabels(language string) localizedAlertLabels {
+	if language == LanguageChinese {
+		return localizedAlertLabels{"事件", "主机", "时间", "告警键", "当前值", "阈值", "技术详情", "CLIProxyAPI 地址"}
+	}
+	return localizedAlertLabels{"Event", "Host", "Timestamp", "Alert key", "Current", "Threshold", "Details", "CLIProxyAPI base URL"}
+}
+
+func renderAlertHTML(event Event, timestamp time.Time, color, background, border, language, kind, object, current, threshold string) string {
+	labels := alertLabels(language)
+	return emailShell(kind+" · CPA Monitor", fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0 12px">
 <tr><td><span style="display:inline-block;padding:7px 12px;border:1px solid %s;border-radius:999px;background:%s;color:%s;font-size:12px;font-weight:700;letter-spacing:.08em">%s</span></td></tr>
 <tr><td style="font-size:24px;line-height:1.3;font-weight:700;color:#172033">%s</td></tr>
 </table>
 %s
 <div style="margin-top:16px;padding:16px;border:1px solid #dbe3ef;border-radius:10px;background:#f8fafc">
-<div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:#475467;text-transform:uppercase">Details</div>
+<div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:#475467;text-transform:uppercase">%s</div>
 <pre style="margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font:14px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#344054">%s</pre>
-</div>`, color, background, color, html.EscapeString(string(event.Kind)), html.EscapeString(event.Object), detailTable([][2]string{
-		{"Host", event.Hostname}, {"Timestamp", timestamp.Format(time.RFC3339)}, {"Alert key", event.Key},
-		{"Current", event.Current}, {"Threshold", event.Threshold}, {"CLIProxyAPI", event.BaseURL},
-	}), html.EscapeString(event.Details)))
+</div>`, color, background, color, html.EscapeString(kind), html.EscapeString(object), detailTable([][2]string{
+		{labels.host, event.Hostname}, {labels.timestamp, timestamp.Format(time.RFC3339)}, {labels.key, event.Key},
+		{labels.current, current}, {labels.threshold, threshold}, {labels.baseURL, event.BaseURL},
+	}), html.EscapeString(labels.details), html.EscapeString(event.Details)), language)
 }
 
-func renderHealthHTML(report HealthReport) string {
+func renderHealthHTML(report HealthReport, language string) string {
 	timestamp := report.Timestamp.UTC()
 	next := report.NextScheduledAt.UTC()
-	memoryCard := metricCard("Memory", fmt.Sprintf("%.1f%%", report.MemoryUsedPercent), fmt.Sprintf("Alert at %.1f%%", report.MemoryThreshold))
-	diskCard := metricCard("Highest disk", fmt.Sprintf("%.1f%%", report.HighestDiskUsedPercent), fmt.Sprintf("%d mount(s) · alert at %.1f%%", report.DiskMountCount, report.DiskThreshold))
-	tcpCard := metricCard("Total TCP", fmt.Sprintf("%d", report.TotalTCPConnections), fmt.Sprintf("Alert at %d", report.TotalTCPThreshold))
-	portCard := metricCard(fmt.Sprintf("Port %d", report.ServicePort), fmt.Sprintf("%d", report.ServicePortConnections), fmt.Sprintf("Alert at %d", report.ServicePortThreshold))
-	return emailShell("Healthy · CPA Monitor", fmt.Sprintf(`
+	memoryLabel, diskLabel, tcpLabel, portLabel := "Memory", "Highest disk", "Total TCP", fmt.Sprintf("Port %d", report.ServicePort)
+	memoryNote := fmt.Sprintf("Alert at %.1f%%", report.MemoryThreshold)
+	diskNote := fmt.Sprintf("%d mount(s) · alert at %.1f%%", report.DiskMountCount, report.DiskThreshold)
+	tcpNote, portNote := fmt.Sprintf("Alert at %d", report.TotalTCPThreshold), fmt.Sprintf("Alert at %d", report.ServicePortThreshold)
+	badge, heading, summary, nextLabel := "HEALTHY", "All systems are operating normally", "All five monitoring scopes completed successfully with no active conditions.", "Next scheduled report"
+	rows := [][2]string{{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"}, {"Accounts checked", fmt.Sprintf("%d", report.AccountCount)}, {"Base URL", report.BaseURL}}
+	preheader := "Healthy · CPA Monitor"
+	if language == LanguageChinese {
+		memoryLabel, diskLabel, tcpLabel, portLabel = "内存", "最高磁盘使用率", "TCP 连接总数", fmt.Sprintf("端口 %d", report.ServicePort)
+		memoryNote = fmt.Sprintf("告警阈值 %.1f%%", report.MemoryThreshold)
+		diskNote = fmt.Sprintf("%d 个挂载点 · 告警阈值 %.1f%%", report.DiskMountCount, report.DiskThreshold)
+		tcpNote, portNote = fmt.Sprintf("告警阈值 %d", report.TotalTCPThreshold), fmt.Sprintf("告警阈值 %d", report.ServicePortThreshold)
+		badge, heading, summary, nextLabel = "健康", "所有系统运行正常", "五项监控检查均已成功完成，当前没有活动告警。", "下次计划报告"
+		rows = [][2]string{{"主机", report.Hostname}, {"检查时间", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "可访问"}, {"已检查账号", fmt.Sprintf("%d", report.AccountCount)}, {"服务地址", report.BaseURL}}
+		preheader = "健康 · CPA Monitor"
+	}
+	memoryCard := metricCard(memoryLabel, fmt.Sprintf("%.1f%%", report.MemoryUsedPercent), memoryNote)
+	diskCard := metricCard(diskLabel, fmt.Sprintf("%.1f%%", report.HighestDiskUsedPercent), diskNote)
+	tcpCard := metricCard(tcpLabel, fmt.Sprintf("%d", report.TotalTCPConnections), tcpNote)
+	portCard := metricCard(portLabel, fmt.Sprintf("%d", report.ServicePortConnections), portNote)
+	return emailShell(preheader, fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0"><tr>
-<td><span style="display:inline-block;padding:7px 12px;border:1px solid #bbf7d0;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:700;letter-spacing:.08em">HEALTHY</span></td>
-</tr><tr><td style="padding-top:14px;font-size:26px;line-height:1.25;font-weight:700;color:#172033">All systems are operating normally</td></tr>
-<tr><td style="padding-top:8px;font-size:15px;line-height:1.6;color:#475467">All five monitoring scopes completed successfully with no active conditions.</td></tr></table>
+<td><span style="display:inline-block;padding:7px 12px;border:1px solid #bbf7d0;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:700;letter-spacing:.08em">%s</span></td>
+</tr><tr><td style="padding-top:14px;font-size:26px;line-height:1.25;font-weight:700;color:#172033">%s</td></tr>
+<tr><td style="padding-top:8px;font-size:15px;line-height:1.6;color:#475467">%s</td></tr></table>
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="margin-top:20px;border-collapse:collapse"><tr>%s%s</tr><tr>%s%s</tr></table>
 <div style="margin-top:20px">%s</div>
-<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>Next scheduled report</strong><br>%s</div>`, memoryCard, diskCard, tcpCard, portCard, detailTable([][2]string{
-		{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"},
-		{"Accounts checked", fmt.Sprintf("%d", report.AccountCount)}, {"Base URL", report.BaseURL},
-	}), html.EscapeString(next.Format(time.RFC3339))))
+<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339))), language)
 }
 
-func emailShell(preheader, content string) string {
-	return `<!doctype html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CPA Monitor</title></head>` +
+func emailShell(preheader, content, language string) string {
+	footer := "Automated infrastructure status from CPA Monitor. A plain-text version is included for compatibility."
+	if language == LanguageChinese {
+		footer = "此邮件由 CPA Monitor 自动发送，同时附带纯文本版本以兼容不同邮件客户端。"
+	}
+	return `<!doctype html><html lang="` + language + `"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CPA Monitor</title></head>` +
 		`<body style="margin:0;padding:0;background:#f4f7fb;color:#172033;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif">` +
 		`<div style="display:none;max-height:0;overflow:hidden;opacity:0">` + html.EscapeString(preheader) + `</div>` +
 		`<table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td align="center" style="padding:24px 12px">` +
 		`<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#fff;border:1px solid #dbe3ef;border-radius:14px;box-shadow:0 8px 24px rgba(16,24,40,.06)">` +
 		`<tr><td style="padding:18px 24px;border-bottom:1px solid #e7edf5;font-size:14px;font-weight:700;letter-spacing:.04em;color:#1d4ed8">CPA MONITOR</td></tr>` +
 		`<tr><td style="padding:26px 24px">` + content + `</td></tr>` +
-		`<tr><td style="padding:16px 24px;border-top:1px solid #e7edf5;font-size:12px;line-height:1.5;color:#667085">Automated infrastructure status from CPA Monitor. A plain-text version is included for compatibility.</td></tr>` +
+		`<tr><td style="padding:16px 24px;border-top:1px solid #e7edf5;font-size:12px;line-height:1.5;color:#667085">` + footer + `</td></tr>` +
 		`</table></td></tr></table></body></html>`
 }
 
@@ -233,7 +309,7 @@ func validateEvent(event Event) error {
 	if strings.TrimSpace(event.Object) == "" || containsHeaderControl(event.Object) {
 		return fmt.Errorf("mail event object must not be empty or contain header control characters")
 	}
-	if strings.TrimSpace(event.Hostname) == "" || event.Timestamp.IsZero() || strings.TrimSpace(event.Key) == "" || strings.TrimSpace(event.BaseURL) == "" {
+	if strings.TrimSpace(event.Hostname) == "" || event.Timestamp.IsZero() || strings.TrimSpace(event.Key) == "" || containsHeaderControl(event.Key) || strings.TrimSpace(event.BaseURL) == "" {
 		return fmt.Errorf("mail event hostname, timestamp, key, and base URL are required")
 	}
 	return nil
