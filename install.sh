@@ -86,7 +86,10 @@ First-install automation variables:
   CPA_MONITOR_MANAGEMENT_KEY       required secret
   CPA_MONITOR_BASE_URL             default http://127.0.0.1:8317
   CPA_MONITOR_INTERVAL             default 60s
-  CPA_MONITOR_SMTP_HOST            required
+  CPA_MONITOR_ALERT_PRIMARY_CHANNEL        smtp (default) or dingtalk
+  CPA_MONITOR_ALERT_FALLBACK_CHANNEL       empty (default), smtp, or dingtalk
+  CPA_MONITOR_HEALTH_REPORT_CHANNEL        empty follows primary, smtp, or dingtalk
+  CPA_MONITOR_SMTP_HOST            required when SMTP is referenced
   CPA_MONITOR_SMTP_PORT            default 587 (STARTTLS) or 465 (TLS)
   CPA_MONITOR_SMTP_FROM            required sender address
   CPA_MONITOR_SMTP_TO              required comma-separated recipients
@@ -94,6 +97,14 @@ First-install automation variables:
   CPA_MONITOR_SMTP_USERNAME        optional; requires matching password
   CPA_MONITOR_SMTP_PASSWORD        optional; requires matching username
   CPA_MONITOR_EMAIL_LANGUAGE       zh-CN (default) or en
+  CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN        required secret when DingTalk is referenced
+  CPA_MONITOR_DINGTALK_SIGNING_SECRET       required secret when DingTalk is referenced
+  CPA_MONITOR_DINGTALK_AT_USER_IDS          optional comma-separated user IDs
+  CPA_MONITOR_DINGTALK_AT_MOBILES           optional comma-separated mobile numbers
+  CPA_MONITOR_DINGTALK_AT_ALL                default false
+  CPA_MONITOR_DINGTALK_LANGUAGE              zh-CN (default) or en
+  CPA_MONITOR_DINGTALK_TIMEOUT               default 10s
+  CPA_MONITOR_DINGTALK_MAX_ITEMS             default 10
   CPA_MONITOR_HEALTH_REPORT_ENABLED        default true
   CPA_MONITOR_HEALTH_REPORT_INTERVAL       default 24h
   CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL default 15m
@@ -421,9 +432,12 @@ load_generation_values() {
     TOTAL_TCP_CONNECTIONS="${CPA_MONITOR_TOTAL_TCP_CONNECTIONS:-3000}"
     SERVICE_PORT_CONNECTIONS="${CPA_MONITOR_SERVICE_PORT_CONNECTIONS:-800}"
     SEND_RECOVERY="${CPA_MONITOR_SEND_RECOVERY:-false}"
+	ALERT_PRIMARY_CHANNEL="${CPA_MONITOR_ALERT_PRIMARY_CHANNEL:-smtp}"
+	ALERT_FALLBACK_CHANNEL="${CPA_MONITOR_ALERT_FALLBACK_CHANNEL:-}"
     HEALTH_REPORT_ENABLED="${CPA_MONITOR_HEALTH_REPORT_ENABLED:-true}"
     HEALTH_REPORT_INTERVAL="${CPA_MONITOR_HEALTH_REPORT_INTERVAL:-24h}"
     HEALTH_REPORT_RETRY_INTERVAL="${CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL:-15m}"
+	HEALTH_REPORT_CHANNEL="${CPA_MONITOR_HEALTH_REPORT_CHANNEL:-}"
     LOG_LEVEL="${CPA_MONITOR_LOG_LEVEL:-info}"
     LOG_FILE_ENABLED="${CPA_MONITOR_LOG_FILE_ENABLED:-true}"
     LOG_MAX_SIZE_MB="${CPA_MONITOR_LOG_MAX_SIZE_MB:-20}"
@@ -438,54 +452,123 @@ load_generation_values() {
     EMAIL_LANGUAGE="${CPA_MONITOR_EMAIL_LANGUAGE:-zh-CN}"
     SMTP_USERNAME="${CPA_MONITOR_SMTP_USERNAME:-}"
     SMTP_PASSWORD="${CPA_MONITOR_SMTP_PASSWORD:-}"
+	DINGTALK_WEBHOOK_TOKEN="${CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN:-}"
+	DINGTALK_SIGNING_SECRET="${CPA_MONITOR_DINGTALK_SIGNING_SECRET:-}"
+	DINGTALK_AT_USER_IDS_CSV="${CPA_MONITOR_DINGTALK_AT_USER_IDS:-}"
+	DINGTALK_AT_MOBILES_CSV="${CPA_MONITOR_DINGTALK_AT_MOBILES:-}"
+	DINGTALK_AT_ALL="${CPA_MONITOR_DINGTALK_AT_ALL:-false}"
+	DINGTALK_LANGUAGE="${CPA_MONITOR_DINGTALK_LANGUAGE:-zh-CN}"
+	DINGTALK_TIMEOUT="${CPA_MONITOR_DINGTALK_TIMEOUT:-10s}"
+	DINGTALK_MAX_ITEMS="${CPA_MONITOR_DINGTALK_MAX_ITEMS:-10}"
     MANAGEMENT_KEY="${CPA_MONITOR_MANAGEMENT_KEY:-}"
+}
+
+resolved_health_channel() {
+	if [[ -n "$HEALTH_REPORT_CHANNEL" ]]; then
+		printf '%s' "$HEALTH_REPORT_CHANNEL"
+	else
+		printf '%s' "$ALERT_PRIMARY_CHANNEL"
+	fi
+}
+
+uses_channel() {
+	local channel="$1"
+	[[ "$ALERT_PRIMARY_CHANNEL" == "$channel" || "$ALERT_FALLBACK_CHANNEL" == "$channel" ]] && return 0
+	[[ "$HEALTH_REPORT_ENABLED" == "true" && "$(resolved_health_channel)" == "$channel" ]]
 }
 
 collect_interactive_values() {
     if [[ "$CONFIG_ACTION" == "generate" ]]; then
+		prompt_plain "Primary alert channel (smtp/dingtalk)" "$ALERT_PRIMARY_CHANNEL"
+		ALERT_PRIMARY_CHANNEL="$PROMPT_RESULT"
+		prompt_plain "Fallback alert channel (empty/smtp/dingtalk)" "$ALERT_FALLBACK_CHANNEL"
+		ALERT_FALLBACK_CHANNEL="$PROMPT_RESULT"
         prompt_plain "CLIProxyAPI base URL" "$BASE_URL"
         BASE_URL="$PROMPT_RESULT"
         prompt_plain "Monitor interval" "$MONITOR_INTERVAL"
         MONITOR_INTERVAL="$PROMPT_RESULT"
-        prompt_plain "Email language (zh-CN/en)" "$EMAIL_LANGUAGE"
-        EMAIL_LANGUAGE="$PROMPT_RESULT"
-        prompt_plain "Enable periodic healthy email (true/false)" "$HEALTH_REPORT_ENABLED"
+		prompt_plain "Enable periodic healthy notification (true/false)" "$HEALTH_REPORT_ENABLED"
         HEALTH_REPORT_ENABLED="$PROMPT_RESULT"
         if [[ "$HEALTH_REPORT_ENABLED" == "true" ]]; then
-            prompt_plain "Healthy email interval" "$HEALTH_REPORT_INTERVAL"
+			prompt_plain "Healthy notification channel (empty follows primary/smtp/dingtalk)" "$HEALTH_REPORT_CHANNEL"
+			HEALTH_REPORT_CHANNEL="$PROMPT_RESULT"
+			prompt_plain "Healthy notification interval" "$HEALTH_REPORT_INTERVAL"
             HEALTH_REPORT_INTERVAL="$PROMPT_RESULT"
-            prompt_plain "Healthy email retry interval after failure" "$HEALTH_REPORT_RETRY_INTERVAL"
+			prompt_plain "Healthy notification retry interval after failure" "$HEALTH_REPORT_RETRY_INTERVAL"
             HEALTH_REPORT_RETRY_INTERVAL="$PROMPT_RESULT"
         fi
-        prompt_plain "SMTP mode (starttls/tls)" "$SMTP_MODE"
-        SMTP_MODE="$PROMPT_RESULT"
-        if [[ -z "$SMTP_PORT" ]]; then
-            if [[ "$SMTP_MODE" == "tls" ]]; then
-                SMTP_PORT="465"
-            else
-                SMTP_PORT="587"
-            fi
-        fi
-        prompt_required "SMTP host" "$SMTP_HOST"
-        SMTP_HOST="$PROMPT_RESULT"
-        prompt_plain "SMTP port" "$SMTP_PORT"
-        SMTP_PORT="$PROMPT_RESULT"
-        prompt_required "Alert sender address" "$SMTP_FROM"
-        SMTP_FROM="$PROMPT_RESULT"
-        prompt_required "Alert recipients (comma-separated)" "$SMTP_TO_CSV"
-        SMTP_TO_CSV="$PROMPT_RESULT"
+		if uses_channel smtp; then
+			prompt_plain "Email language (zh-CN/en)" "$EMAIL_LANGUAGE"
+			EMAIL_LANGUAGE="$PROMPT_RESULT"
+			prompt_plain "SMTP mode (starttls/tls)" "$SMTP_MODE"
+			SMTP_MODE="$PROMPT_RESULT"
+			if [[ -z "$SMTP_PORT" ]]; then
+				if [[ "$SMTP_MODE" == "tls" ]]; then SMTP_PORT="465"; else SMTP_PORT="587"; fi
+			fi
+			prompt_required "SMTP host" "$SMTP_HOST"
+			SMTP_HOST="$PROMPT_RESULT"
+			prompt_plain "SMTP port" "$SMTP_PORT"
+			SMTP_PORT="$PROMPT_RESULT"
+			prompt_required "Alert sender address" "$SMTP_FROM"
+			SMTP_FROM="$PROMPT_RESULT"
+			prompt_required "Alert recipients (comma-separated)" "$SMTP_TO_CSV"
+			SMTP_TO_CSV="$PROMPT_RESULT"
+		fi
+		if uses_channel dingtalk; then
+			prompt_plain "DingTalk language (zh-CN/en)" "$DINGTALK_LANGUAGE"
+			DINGTALK_LANGUAGE="$PROMPT_RESULT"
+			prompt_plain "DingTalk @ user IDs (comma-separated, optional)" "$DINGTALK_AT_USER_IDS_CSV"
+			DINGTALK_AT_USER_IDS_CSV="$PROMPT_RESULT"
+			prompt_plain "DingTalk @ mobiles (comma-separated, optional)" "$DINGTALK_AT_MOBILES_CSV"
+			DINGTALK_AT_MOBILES_CSV="$PROMPT_RESULT"
+			prompt_plain "DingTalk @ all (true/false)" "$DINGTALK_AT_ALL"
+			DINGTALK_AT_ALL="$PROMPT_RESULT"
+		fi
     fi
 
     if [[ "$ENV_ACTION" == "generate" ]]; then
         prompt_required_secret "CLIProxyAPI management key" "$MANAGEMENT_KEY"
         MANAGEMENT_KEY="$PROMPT_RESULT"
-        prompt_plain "SMTP username (empty disables authentication)" "$SMTP_USERNAME"
-        SMTP_USERNAME="$PROMPT_RESULT"
-        if [[ -n "$SMTP_USERNAME" || -n "$SMTP_PASSWORD" ]]; then
-            prompt_required_secret "SMTP password" "$SMTP_PASSWORD"
-            SMTP_PASSWORD="$PROMPT_RESULT"
-        fi
+		if uses_channel smtp; then
+			prompt_plain "SMTP username (empty disables authentication)" "$SMTP_USERNAME"
+			SMTP_USERNAME="$PROMPT_RESULT"
+			if [[ -n "$SMTP_USERNAME" || -n "$SMTP_PASSWORD" ]]; then
+				prompt_required_secret "SMTP password" "$SMTP_PASSWORD"
+				SMTP_PASSWORD="$PROMPT_RESULT"
+			fi
+		fi
+		if uses_channel dingtalk; then
+			prompt_required_secret "DingTalk webhook token" "$DINGTALK_WEBHOOK_TOKEN"
+			DINGTALK_WEBHOOK_TOKEN="$PROMPT_RESULT"
+			prompt_required_secret "DingTalk signing secret" "$DINGTALK_SIGNING_SECRET"
+			DINGTALK_SIGNING_SECRET="$PROMPT_RESULT"
+		fi
     fi
+}
+
+split_optional_csv() {
+	local field="$1"
+	local csv="$2"
+	local item
+	local cleaned
+	local existing
+	local duplicate
+	local -a raw=()
+	SPLIT_RESULT=()
+	[[ -n "$csv" ]] || return 0
+	reject_line_breaks "$field" "$csv"
+	IFS=',' read -r -a raw <<< "$csv"
+	for item in "${raw[@]}"; do
+		cleaned="$(trim "$item")"
+		[[ -n "$cleaned" ]] || continue
+		duplicate=false
+		if (( ${#SPLIT_RESULT[@]} > 0 )); then
+			for existing in "${SPLIT_RESULT[@]}"; do
+				if [[ "$existing" == "$cleaned" ]]; then duplicate=true; break; fi
+			done
+		fi
+		if [[ "$duplicate" == "false" ]]; then SPLIT_RESULT+=("$cleaned"); fi
+	done
 }
 
 split_recipients() {
@@ -505,12 +588,13 @@ split_recipients() {
 }
 
 validate_generation_values() {
-    if [[ "$CONFIG_ACTION" == "generate" ]]; then
+	if [[ "$CONFIG_ACTION" == "generate" ]]; then
+		case "$ALERT_PRIMARY_CHANNEL" in smtp|dingtalk) ;; *) die "CPA_MONITOR_ALERT_PRIMARY_CHANNEL must be smtp or dingtalk" ;; esac
+		case "$ALERT_FALLBACK_CHANNEL" in ''|smtp|dingtalk) ;; *) die "CPA_MONITOR_ALERT_FALLBACK_CHANNEL must be empty, smtp, or dingtalk" ;; esac
+		[[ -z "$ALERT_FALLBACK_CHANNEL" || "$ALERT_FALLBACK_CHANNEL" != "$ALERT_PRIMARY_CHANNEL" ]] || die "fallback channel must differ from primary channel"
+		case "$HEALTH_REPORT_CHANNEL" in ''|smtp|dingtalk) ;; *) die "CPA_MONITOR_HEALTH_REPORT_CHANNEL must be empty, smtp, or dingtalk" ;; esac
         reject_line_breaks "CPA_MONITOR_BASE_URL" "$BASE_URL"
-        reject_line_breaks "CPA_MONITOR_SMTP_HOST" "$SMTP_HOST"
-        reject_line_breaks "CPA_MONITOR_SMTP_FROM" "$SMTP_FROM"
         validate_monitor_duration "$MONITOR_INTERVAL" "CPA_MONITOR_INTERVAL"
-        [[ "$EMAIL_LANGUAGE" == "zh-CN" || "$EMAIL_LANGUAGE" == "en" ]] || die "CPA_MONITOR_EMAIL_LANGUAGE must be zh-CN or en"
         validate_bool "CPA_MONITOR_HEALTH_REPORT_ENABLED" "$HEALTH_REPORT_ENABLED"
         validate_monitor_duration "$HEALTH_REPORT_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_INTERVAL"
         validate_monitor_duration "$HEALTH_REPORT_RETRY_INTERVAL" "CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL"
@@ -529,32 +613,63 @@ validate_generation_values() {
         validate_positive_int "CPA_MONITOR_LOG_MAX_FILES" "$LOG_MAX_FILES"
         validate_positive_int "CPA_MONITOR_LOG_MAX_TOTAL_SIZE_MB" "$LOG_MAX_TOTAL_SIZE_MB"
         (( 10#$LOG_MAX_TOTAL_SIZE_MB >= 10#$LOG_MAX_SIZE_MB )) || die "log total size must be at least log file size"
-        [[ -n "$SMTP_HOST" ]] || die "CPA_MONITOR_SMTP_HOST is required"
-        [[ -n "$SMTP_FROM" ]] || die "CPA_MONITOR_SMTP_FROM is required"
-        [[ "$SMTP_MODE" == "starttls" || "$SMTP_MODE" == "tls" ]] || die "CPA_MONITOR_SMTP_MODE must be starttls or tls"
-        if [[ -z "$SMTP_PORT" ]]; then
-            if [[ "$SMTP_MODE" == "tls" ]]; then SMTP_PORT=465; else SMTP_PORT=587; fi
-        fi
-        validate_positive_int "CPA_MONITOR_SMTP_PORT" "$SMTP_PORT"
-        (( 10#$SMTP_PORT <= 65535 )) || die "CPA_MONITOR_SMTP_PORT must be at most 65535"
-        split_recipients
+		if uses_channel smtp; then
+			reject_line_breaks "CPA_MONITOR_SMTP_HOST" "$SMTP_HOST"
+			reject_line_breaks "CPA_MONITOR_SMTP_FROM" "$SMTP_FROM"
+			[[ "$EMAIL_LANGUAGE" == "zh-CN" || "$EMAIL_LANGUAGE" == "en" ]] || die "CPA_MONITOR_EMAIL_LANGUAGE must be zh-CN or en"
+			[[ -n "$SMTP_HOST" ]] || die "CPA_MONITOR_SMTP_HOST is required"
+			[[ -n "$SMTP_FROM" ]] || die "CPA_MONITOR_SMTP_FROM is required"
+			[[ "$SMTP_MODE" == "starttls" || "$SMTP_MODE" == "tls" ]] || die "CPA_MONITOR_SMTP_MODE must be starttls or tls"
+			if [[ -z "$SMTP_PORT" ]]; then
+				if [[ "$SMTP_MODE" == "tls" ]]; then SMTP_PORT=465; else SMTP_PORT=587; fi
+			fi
+			validate_positive_int "CPA_MONITOR_SMTP_PORT" "$SMTP_PORT"
+			(( 10#$SMTP_PORT <= 65535 )) || die "CPA_MONITOR_SMTP_PORT must be at most 65535"
+			split_recipients
+		else
+			SMTP_RECIPIENTS=()
+		fi
+		if uses_channel dingtalk; then
+			[[ "$DINGTALK_LANGUAGE" == "zh-CN" || "$DINGTALK_LANGUAGE" == "en" ]] || die "CPA_MONITOR_DINGTALK_LANGUAGE must be zh-CN or en"
+			validate_monitor_duration "$DINGTALK_TIMEOUT" "CPA_MONITOR_DINGTALK_TIMEOUT"
+			validate_positive_int "CPA_MONITOR_DINGTALK_MAX_ITEMS" "$DINGTALK_MAX_ITEMS"
+			(( 10#$DINGTALK_MAX_ITEMS <= 50 )) || die "CPA_MONITOR_DINGTALK_MAX_ITEMS must be at most 50"
+			validate_bool "CPA_MONITOR_DINGTALK_AT_ALL" "$DINGTALK_AT_ALL"
+			split_optional_csv "CPA_MONITOR_DINGTALK_AT_USER_IDS" "$DINGTALK_AT_USER_IDS_CSV"
+			if (( ${#SPLIT_RESULT[@]} > 0 )); then DINGTALK_AT_USER_IDS=("${SPLIT_RESULT[@]}"); else DINGTALK_AT_USER_IDS=(); fi
+			split_optional_csv "CPA_MONITOR_DINGTALK_AT_MOBILES" "$DINGTALK_AT_MOBILES_CSV"
+			if (( ${#SPLIT_RESULT[@]} > 0 )); then DINGTALK_AT_MOBILES=("${SPLIT_RESULT[@]}"); else DINGTALK_AT_MOBILES=(); fi
+			if [[ "$DINGTALK_AT_ALL" == "true" ]] && (( ${#DINGTALK_AT_USER_IDS[@]} > 0 || ${#DINGTALK_AT_MOBILES[@]} > 0 )); then
+				die "CPA_MONITOR_DINGTALK_AT_ALL cannot be combined with individual user IDs or mobiles"
+			fi
+		else
+			DINGTALK_AT_USER_IDS=()
+			DINGTALK_AT_MOBILES=()
+		fi
     fi
 
     if [[ "$ENV_ACTION" == "generate" ]]; then
         reject_line_breaks "CPA_MONITOR_MANAGEMENT_KEY" "$MANAGEMENT_KEY"
         reject_line_breaks "CPA_MONITOR_SMTP_USERNAME" "$SMTP_USERNAME"
         reject_line_breaks "CPA_MONITOR_SMTP_PASSWORD" "$SMTP_PASSWORD"
+		reject_line_breaks "CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN" "$DINGTALK_WEBHOOK_TOKEN"
+		reject_line_breaks "CPA_MONITOR_DINGTALK_SIGNING_SECRET" "$DINGTALK_SIGNING_SECRET"
         [[ -n "$(trim "$MANAGEMENT_KEY")" ]] || die "CPA_MONITOR_MANAGEMENT_KEY is required"
-        if [[ -n "$SMTP_USERNAME" && -z "$SMTP_PASSWORD" ]] || [[ -z "$SMTP_USERNAME" && -n "$SMTP_PASSWORD" ]]; then
+		if uses_channel smtp && { [[ -n "$SMTP_USERNAME" && -z "$SMTP_PASSWORD" ]] || [[ -z "$SMTP_USERNAME" && -n "$SMTP_PASSWORD" ]]; }; then
             die "SMTP username and password must both be set or both be empty"
         fi
+		if uses_channel dingtalk; then
+			[[ -n "$(trim "$DINGTALK_WEBHOOK_TOKEN")" ]] || die "CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN is required"
+			[[ -n "$(trim "$DINGTALK_SIGNING_SECRET")" ]] || die "CPA_MONITOR_DINGTALK_SIGNING_SECRET is required"
+		fi
     fi
 }
 
 render_config() {
     local starttls="false"
     local tls="false"
-    local recipient
+	local recipient
+	local mention
     if [[ "$SMTP_MODE" == "starttls" ]]; then starttls="true"; else tls="true"; fi
 
     cat <<EOF
@@ -576,12 +691,18 @@ thresholds:
 alerts:
   send_recovery: ${SEND_RECOVERY}
   state_file: ${PROD_STATE_DIR}/state/alerts.json
+  primary_channel: $(yaml_quote "$ALERT_PRIMARY_CHANNEL")
+  fallback_channel: $(yaml_quote "$ALERT_FALLBACK_CHANNEL")
 
 health_report:
   enabled: ${HEALTH_REPORT_ENABLED}
   interval: $(yaml_quote "$HEALTH_REPORT_INTERVAL")
   retry_interval: $(yaml_quote "$HEALTH_REPORT_RETRY_INTERVAL")
+  channel: $(yaml_quote "$HEALTH_REPORT_CHANNEL")
 
+EOF
+	if uses_channel smtp; then
+		cat <<EOF
 smtp:
   host: $(yaml_quote "$SMTP_HOST")
   port: ${SMTP_PORT}
@@ -601,6 +722,35 @@ EOF
   tls: ${tls}
   timeout: 10s
 
+EOF
+	fi
+	if uses_channel dingtalk; then
+		cat <<EOF
+dingtalk:
+  webhook_token: ''
+  webhook_token_env: CPA_DINGTALK_WEBHOOK_TOKEN
+  signing_secret: ''
+  signing_secret_env: CPA_DINGTALK_SIGNING_SECRET
+  language: $(yaml_quote "$DINGTALK_LANGUAGE")
+  timeout: $(yaml_quote "$DINGTALK_TIMEOUT")
+  max_items: ${DINGTALK_MAX_ITEMS}
+EOF
+		if (( ${#DINGTALK_AT_USER_IDS[@]} == 0 )); then
+			printf '  at_user_ids: []\n'
+		else
+			printf '  at_user_ids:\n'
+			for mention in "${DINGTALK_AT_USER_IDS[@]}"; do printf '    - %s\n' "$(yaml_quote "$mention")"; done
+		fi
+		if (( ${#DINGTALK_AT_MOBILES[@]} == 0 )); then
+			printf '  at_mobiles: []\n'
+		else
+			printf '  at_mobiles:\n'
+			for mention in "${DINGTALK_AT_MOBILES[@]}"; do printf '    - %s\n' "$(yaml_quote "$mention")"; done
+		fi
+		printf '  at_all: %s\n\n' "$DINGTALK_AT_ALL"
+	fi
+	cat <<EOF
+
 logging:
   level: ${LOG_LEVEL}
   file:
@@ -618,6 +768,10 @@ render_environment() {
         printf 'CPA_SMTP_USERNAME=%s\n' "$(systemd_env_quote "$SMTP_USERNAME")"
         printf 'CPA_SMTP_PASSWORD=%s\n' "$(systemd_env_quote "$SMTP_PASSWORD")"
     fi
+	if [[ -n "$DINGTALK_WEBHOOK_TOKEN" ]]; then
+		printf 'CPA_DINGTALK_WEBHOOK_TOKEN=%s\n' "$(systemd_env_quote "$DINGTALK_WEBHOOK_TOKEN")"
+		printf 'CPA_DINGTALK_SIGNING_SECRET=%s\n' "$(systemd_env_quote "$DINGTALK_SIGNING_SECRET")"
+	fi
 }
 
 render_service_hardening() {
@@ -1114,6 +1268,8 @@ validate_generated_config() {
         CPA_MANAGEMENT_KEY="$MANAGEMENT_KEY" \
         CPA_SMTP_USERNAME="$SMTP_USERNAME" \
         CPA_SMTP_PASSWORD="$SMTP_PASSWORD" \
+		CPA_DINGTALK_WEBHOOK_TOKEN="$DINGTALK_WEBHOOK_TOKEN" \
+		CPA_DINGTALK_SIGNING_SECRET="$DINGTALK_SIGNING_SECRET" \
         "$STAGE_BINARY" --config "$STAGE_CONFIG" --check-config >/dev/null
     else
         warn "copied or existing configuration will be validated when the selected service starts"

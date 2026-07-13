@@ -44,6 +44,12 @@ func TestLoadAppliesDocumentedDefaults(t *testing.T) {
 	if got, want := cfg.Alerts.StateFile, "state/alerts.json"; got != want {
 		t.Errorf("Alerts.StateFile = %q, want %q", got, want)
 	}
+	if got, want := cfg.Alerts.PrimaryChannel, "smtp"; got != want {
+		t.Errorf("Alerts.PrimaryChannel = %q, want %q", got, want)
+	}
+	if cfg.Alerts.FallbackChannel != "" {
+		t.Errorf("Alerts.FallbackChannel = %q, want empty", cfg.Alerts.FallbackChannel)
+	}
 	if cfg.HealthReport.Enabled {
 		t.Error("HealthReport.Enabled = true, want false")
 	}
@@ -64,6 +70,15 @@ func TestLoadAppliesDocumentedDefaults(t *testing.T) {
 	}
 	if !cfg.SMTP.StartTLS || cfg.SMTP.TLS {
 		t.Errorf("SMTP TLS modes = starttls:%t tls:%t, want true/false", cfg.SMTP.StartTLS, cfg.SMTP.TLS)
+	}
+	if got, want := cfg.DingTalk.Language, "zh-CN"; got != want {
+		t.Errorf("DingTalk.Language = %q, want %q", got, want)
+	}
+	if got, want := cfg.DingTalk.Timeout.Duration, 10*time.Second; got != want {
+		t.Errorf("DingTalk.Timeout = %v, want %v", got, want)
+	}
+	if got, want := cfg.DingTalk.MaxItems, 10; got != want {
+		t.Errorf("DingTalk.MaxItems = %d, want %d", got, want)
 	}
 	if got, want := cfg.Logging.Level, "info"; got != want {
 		t.Errorf("Logging.Level = %q, want %q", got, want)
@@ -172,6 +187,77 @@ smtp:
 	}
 	if cfg.SMTP.Password != env["PASSWORD_ENV"] {
 		t.Errorf("SMTP password was not overridden")
+	}
+}
+
+func TestDingTalkOnlyDoesNotRequireSMTP(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, validYAML(`
+cliproxy:
+  management_key: key
+alerts:
+  primary_channel: DINGTALK
+dingtalk:
+  webhook_token: token
+  signing_secret: secret
+  language: ZH-cn
+  at_user_ids: [user-a, " user-a ", ""]
+`))
+	cfg, err := LoadWithEnv(path, noEnvironment)
+	if err != nil {
+		t.Fatalf("LoadWithEnv() error = %v", err)
+	}
+	if got, want := cfg.Alerts.PrimaryChannel, "dingtalk"; got != want {
+		t.Fatalf("PrimaryChannel = %q, want %q", got, want)
+	}
+	if cfg.UsesChannel("smtp") {
+		t.Fatal("UsesChannel(smtp) = true")
+	}
+	if !cfg.UsesChannel("dingtalk") {
+		t.Fatal("UsesChannel(dingtalk) = false")
+	}
+	if got, want := cfg.DingTalk.AtUserIDs, []string{"user-a"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("AtUserIDs = %v, want %v", got, want)
+	}
+}
+
+func TestDingTalkEnvironmentOverridesSecrets(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfig(t, validYAML(`
+cliproxy:
+  management_key: key
+alerts:
+  primary_channel: dingtalk
+dingtalk:
+  webhook_token: inline-token
+  webhook_token_env: TOKEN_ENV
+  signing_secret: inline-secret
+  signing_secret_env: SECRET_ENV
+`))
+	cfg, err := LoadWithEnv(path, mapLookup(map[string]string{
+		"TOKEN_ENV":  "environment-token",
+		"SECRET_ENV": "environment-secret",
+	}))
+	if err != nil {
+		t.Fatalf("LoadWithEnv() error = %v", err)
+	}
+	if cfg.DingTalk.WebhookToken != "environment-token" || cfg.DingTalk.SigningSecret != "environment-secret" {
+		t.Fatal("DingTalk environment overrides were not applied")
+	}
+}
+
+func TestHealthReportChannelDefaultsToPrimary(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Alerts.PrimaryChannel = "dingtalk"
+	if got, want := cfg.HealthReportChannel(), "dingtalk"; got != want {
+		t.Fatalf("HealthReportChannel() = %q, want %q", got, want)
+	}
+	cfg.HealthReport.Channel = "smtp"
+	if got, want := cfg.HealthReportChannel(), "smtp"; got != want {
+		t.Fatalf("HealthReportChannel() = %q, want %q", got, want)
 	}
 }
 
@@ -343,6 +429,15 @@ func TestValidation(t *testing.T) {
 		{name: "empty state file", yaml: baseYAML("alerts:\n  state_file: ''"), wantInErr: "state_file"},
 		{name: "zero health interval", yaml: baseYAML("health_report:\n  interval: 0s"), wantInErr: "health_report.interval"},
 		{name: "zero health retry interval", yaml: baseYAML("health_report:\n  retry_interval: 0s"), wantInErr: "health_report.retry_interval"},
+		{name: "bad primary channel", yaml: baseYAML("alerts:\n  primary_channel: pager"), wantInErr: "primary_channel"},
+		{name: "same fallback channel", yaml: baseYAML("alerts:\n  primary_channel: smtp\n  fallback_channel: smtp"), wantInErr: "fallback_channel"},
+		{name: "bad health channel", yaml: baseYAML("health_report:\n  channel: pager"), wantInErr: "health_report.channel"},
+		{name: "missing DingTalk token", yaml: dingTalkYAML("dingtalk:\n  signing_secret: secret"), wantInErr: "webhook token"},
+		{name: "missing DingTalk secret", yaml: dingTalkYAML("dingtalk:\n  webhook_token: token"), wantInErr: "signing secret"},
+		{name: "zero DingTalk timeout", yaml: dingTalkYAML("dingtalk:\n  webhook_token: token\n  signing_secret: secret\n  timeout: 0s"), wantInErr: "dingtalk.timeout"},
+		{name: "bad DingTalk language", yaml: dingTalkYAML("dingtalk:\n  webhook_token: token\n  signing_secret: secret\n  language: fr"), wantInErr: "dingtalk.language"},
+		{name: "bad DingTalk max items", yaml: dingTalkYAML("dingtalk:\n  webhook_token: token\n  signing_secret: secret\n  max_items: 0"), wantInErr: "dingtalk.max_items"},
+		{name: "DingTalk at all conflict", yaml: dingTalkYAML("dingtalk:\n  webhook_token: token\n  signing_secret: secret\n  at_all: true\n  at_user_ids: [user-a]"), wantInErr: "dingtalk.at_all"},
 	}
 
 	for _, tt := range tests {
@@ -448,4 +543,8 @@ func baseYAML(override string) string {
 		parts = append(parts, trimmed)
 	}
 	return strings.Join(parts, "\n") + "\n"
+}
+
+func dingTalkYAML(section string) string {
+	return "cliproxy:\n  management_key: key\nalerts:\n  primary_channel: dingtalk\n" + section + "\n"
 }

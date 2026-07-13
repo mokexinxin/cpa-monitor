@@ -12,11 +12,11 @@ It checks:
 - all TCP entries in `/proc/net/tcp` and `/proc/net/tcp6`;
 - account availability from `GET /v0/management/auth-files`.
 
-Alerts are sent through SMTP once when a condition becomes unhealthy. The
-same key is suppressed until it recovers. Optional recovery mail can be
-enabled. Scheduled health reports can also confirm that every monitoring scope
-is working and healthy; all emails include an HTML view and a plain-text
-fallback.
+Alerts can be sent through a signed DingTalk custom group robot, SMTP, or a
+primary/fallback combination. The same key is suppressed until it recovers.
+Optional recovery notifications and scheduled health reports use the selected
+channel too. SMTP messages include HTML and plain-text alternatives; DingTalk
+messages use Markdown and group conditions by monitoring scope.
 
 ## Quick install (Linux)
 
@@ -30,9 +30,9 @@ curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/main/bootstr
 The bootstrap verifies the release SHA-256 checksum, opens the interactive
 configuration prompts, installs the systemd units, and starts
 `cpa-monitor.service`. The server needs systemd, `curl`, and `flock`; Go is not
-required. New generated installations enable a daily health email by default;
-the first fully healthy cycle sends one immediately, which also verifies the
-SMTP configuration end to end. Email content defaults to Simplified Chinese.
+required. New generated installations enable a daily health notification by
+default; the first fully healthy cycle sends one immediately. Notification
+content defaults to Simplified Chinese.
 
 After installation:
 
@@ -88,11 +88,23 @@ systemd timer:
 ```
 
 Validate configuration without creating the runtime, touching alert state, or
-accessing CLIProxyAPI/SMTP:
+accessing CLIProxyAPI/SMTP/DingTalk:
 
 ```sh
 ./cpa-monitor --config config.yaml --check-config
 ```
+
+Send an explicit end-to-end test without accessing CLIProxyAPI or state:
+
+```sh
+./cpa-monitor --config config.yaml --test-notification primary
+./cpa-monitor --config config.yaml --test-notification dingtalk
+./cpa-monitor --config config.yaml --test-notification smtp
+```
+
+`primary` exercises the configured primary and fallback route. An explicit
+channel tests only that channel and fails if it is not referenced by the
+configuration.
 
 The default configuration path is `config.yaml` in the current working
 directory. Relative state and log paths are also resolved from the current
@@ -100,14 +112,14 @@ working directory.
 
 In `--once` mode, detecting an unhealthy monitored condition is not itself a
 process failure when alert processing succeeds. Collector, Management API,
-SMTP, state, or other monitor execution errors produce a non-zero exit after
+notification delivery, state, or other monitor execution errors produce a non-zero exit after
 the remaining independent checks have run. The daemon logs the same errors and
 continues with the next cycle.
 
 ## Configuration
 
-Copy [`config.example.yaml`](config.example.yaml) and adjust the SMTP
-addresses. The important defaults are:
+Copy [`config.example.yaml`](config.example.yaml) and adjust the notification
+channels. The important defaults are:
 
 | Setting | Default |
 | --- | --- |
@@ -120,13 +132,19 @@ addresses. The important defaults are:
 | `thresholds.service_port_connections` | `800` |
 | `alerts.send_recovery` | `false` |
 | `alerts.state_file` | `state/alerts.json` |
+| `alerts.primary_channel` | `smtp` |
+| `alerts.fallback_channel` | empty |
 | `health_report.enabled` | `false` for omitted/existing configs; installer default `true` |
 | `health_report.interval` | `24h` |
 | `health_report.retry_interval` | `15m` |
+| `health_report.channel` | empty; follows primary |
 | `smtp.port` | `587` |
 | `smtp.language` | `zh-CN` |
 | `smtp.starttls` | `true` |
 | `smtp.timeout` | `10s` |
+| `dingtalk.language` | `zh-CN` |
+| `dingtalk.timeout` | `10s` |
+| `dingtalk.max_items` | `10` |
 | `logging.file.enabled` | `false` |
 | `logging.file.max_size_mb` | `20` |
 | `logging.file.max_files` | `5` rotated backups |
@@ -137,9 +155,9 @@ stop startup with a field-specific error.
 
 ### Secrets
 
-`management_key_env`, `username_env`, and `password_env` name environment
-variables that override their inline values whenever the variables are set.
-Keep inline secret values empty in configuration committed to source control.
+The `*_env` settings name environment variables that override inline values
+whenever the variables are set. Keep inline Management, SMTP, and DingTalk
+secret values empty in configuration committed to source control.
 
 For the example configuration:
 
@@ -147,6 +165,8 @@ For the example configuration:
 export CPA_MANAGEMENT_KEY='replace-with-management-key'
 export CPA_SMTP_USERNAME='smtp-user'
 export CPA_SMTP_PASSWORD='smtp-password'
+export CPA_DINGTALK_WEBHOOK_TOKEN='access-token-only'
+export CPA_DINGTALK_SIGNING_SECRET='SEC...'
 ```
 
 The Management key is required because account monitoring is always enabled.
@@ -170,6 +190,57 @@ smtp:
   starttls: false
   tls: true
 ```
+
+### DingTalk custom robot
+
+完整的中文创建、配置、systemd 验证、排障、凭证轮换和回滚流程见
+[`docs/dingtalk-integration.md`](docs/dingtalk-integration.md)。
+
+Create a dedicated internal alert group, add a custom robot, and enable the
+**signature** security mode. The official setup entry is [Create a custom
+robot](https://open.dingtalk.com/document/dingstart/custom-bot-creation-and-installation),
+and the webhook message behavior is documented in [Robot reply/send
+messages](https://open.dingtalk.com/document/dingstart/robot-reply-and-send-messages).
+Custom robots post to their group; they are not a direct-message channel.
+
+From the generated Webhook, copy only the `access_token` query value into
+`CPA_DINGTALK_WEBHOOK_TOKEN`, and put the signature secret into
+`CPA_DINGTALK_SIGNING_SECRET`. CPA Monitor fixes the destination to
+`https://oapi.dingtalk.com/robot/send`, signs `timestamp + "\n" + secret` with
+HMAC-SHA256, and never accepts a configurable arbitrary webhook host. Keep the
+server clock synchronized. If you also enable the robot's IP allowlist, include
+the monitor server's stable public egress IPv4.
+
+The example configuration uses DingTalk primary with SMTP fallback:
+
+```yaml
+alerts:
+  primary_channel: dingtalk
+  fallback_channel: smtp
+health_report:
+  channel: "" # follows dingtalk primary; no fallback for health reports
+dingtalk:
+  webhook_token_env: CPA_DINGTALK_WEBHOOK_TOKEN
+  signing_secret_env: CPA_DINGTALK_SIGNING_SECRET
+  at_user_ids: []
+  at_mobiles: []
+  at_all: false
+```
+
+For DingTalk-only, leave `fallback_channel` empty and omit `smtp`. For legacy
+SMTP-only, set `primary_channel: smtp`, leave fallback empty, and omit
+`dingtalk`. A successful fallback counts as delivered and advances alert state;
+CPA Monitor does not later replay that occurrence to the recovered primary.
+Only when both primary and fallback fail does the next cycle retry it.
+
+The robot limit is 20 messages per minute. CPA Monitor batches all new alerts
+of the same monitoring scope into one message and does the same for recoveries,
+so one complete cycle emits at most ten alert/recovery robot calls. A DingTalk
+`410100` response starts a local ten-minute cooldown. `310000` commonly points
+to a robot security rule such as a missing keyword, bad signature, timestamp,
+or IP restriction; verify the group robot settings, system clock, token, and
+secret. `max_items` limits how many conditions are expanded in Markdown while
+all keys still enter the deduplication state.
 
 ### Email language
 
@@ -198,7 +269,7 @@ sudo systemctl start cpa-monitor-check.service
 sudo systemctl restart cpa-monitor.service
 ```
 
-### Scheduled health email
+### Scheduled health notification
 
 Enable periodic health reports with:
 
@@ -207,16 +278,17 @@ health_report:
   enabled: true
   interval: 24h
   retry_interval: 15m
+  channel: dingtalk # empty follows alerts.primary_channel
 ```
 
 A report is eligible only after all five scopes—CLIProxyAPI health, memory,
 disk, TCP, and accounts—finish successfully with no active condition. The
 first eligible cycle sends immediately. Later reports follow `interval`; a
-failed SMTP attempt waits for `retry_interval` before retrying. Delivery times
+failed delivery waits for `retry_interval` before retrying. Delivery times
 are stored with alert state, so restarting the service does not send a
 duplicate message.
 
-The HTML report uses an email-client-safe responsive card layout, high-contrast
+The SMTP HTML report uses an email-client-safe responsive card layout, high-contrast
 status labels, and escaped dynamic content. A plain-text alternative is always
 included. Alert and recovery emails use the same multipart HTML/text format.
 
@@ -229,7 +301,7 @@ sudo systemctl restart cpa-monitor.service
 sudo journalctl -u cpa-monitor.service -n 100 --no-pager
 ```
 
-After the restart, wait for a complete healthy cycle. The first health email
+After the restart, wait for a complete healthy cycle. The first health notification
 should arrive immediately; if any scope is unhealthy or unknown, CPA Monitor
 suppresses the health message instead of reporting a false success. A
 successful delivery writes `healthy report sent` to the journal.
@@ -285,7 +357,7 @@ result may raise new alerts for successfully measured mounts but cannot
 recover absent disk keys during that cycle.
 
 If an alert send fails, its key is not activated and the next cycle retries.
-If recovery mail is enabled and that send fails, the key remains active and
+If recovery notification is enabled and that send fails, the key remains active and
 the recovery is retried. A state write failure leaves the in-process state in
 place, so the daemon continues to deduplicate until restart.
 
@@ -332,8 +404,8 @@ To audit or pin what is executed, inspect `bootstrap.sh` first or set
 `CPA_MONITOR_VERSION` to a release tag:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.3.0/bootstrap.sh | \
-  sudo env CPA_MONITOR_VERSION=v0.3.0 bash
+curl -fsSL https://raw.githubusercontent.com/mokexinxin/cpa-monitor/v0.4.0/bootstrap.sh | \
+  sudo env CPA_MONITOR_VERSION=v0.4.0 bash
 ```
 
 For an installation from a local source checkout, install Go 1.26 or newer and
@@ -344,7 +416,7 @@ sudo ./install.sh
 ```
 
 The interactive setup does not place secrets in command-line arguments. It
-prompts for the Management API key and optional SMTP credentials, builds a
+prompts for the Management API key and credentials for the selected channels, builds a
 static binary, runs the Go tests, validates the generated configuration without
 network access, and starts daemon mode.
 
@@ -372,10 +444,13 @@ systemd environment file:
 CPA_MANAGEMENT_KEY="replace-with-management-key"
 CPA_SMTP_USERNAME="smtp-user"
 CPA_SMTP_PASSWORD="smtp-password"
+CPA_DINGTALK_WEBHOOK_TOKEN="access-token-only"
+CPA_DINGTALK_SIGNING_SECRET="SEC..."
 ```
 
 SMTP username/password lines may both be omitted when authentication is not
-needed. Protect the file, then install it:
+needed; DingTalk lines are required only when DingTalk is referenced. Protect
+the file, then install it:
 
 ```sh
 chmod 600 /secure/cpa-monitor.env
@@ -395,6 +470,10 @@ Health-report installer defaults can be overridden with
 `CPA_MONITOR_HEALTH_REPORT_ENABLED`, `CPA_MONITOR_HEALTH_REPORT_INTERVAL`, and
 `CPA_MONITOR_HEALTH_REPORT_RETRY_INTERVAL`. Set generated email language with
 `CPA_MONITOR_EMAIL_LANGUAGE=zh-CN` or `CPA_MONITOR_EMAIL_LANGUAGE=en`.
+Select generated channels with `CPA_MONITOR_ALERT_PRIMARY_CHANNEL`,
+`CPA_MONITOR_ALERT_FALLBACK_CHANNEL`, and
+`CPA_MONITOR_HEALTH_REPORT_CHANNEL`. DingTalk settings use the
+`CPA_MONITOR_DINGTALK_*` variables listed by `./install.sh --help`.
 
 ### Installed paths and upgrades
 
@@ -479,7 +558,7 @@ sudo systemctl stop cpa-monitor-once.service
 ```
 
 The units deliberately avoid `PrivateNetwork` and `/proc` restrictions because
-the monitor needs HTTP/SMTP access plus `/proc/meminfo`, `/proc/net/tcp*`, and
+the monitor needs HTTP/SMTP/DingTalk access plus `/proc/meminfo`, `/proc/net/tcp*`, and
 the host mount view in `/proc/self/mountinfo`. They run unprivileged with no
 capabilities, `NoNewPrivileges`, namespace creation restrictions, address-family
 restrictions, and a restrictive umask. Filesystem mount-namespace hardening

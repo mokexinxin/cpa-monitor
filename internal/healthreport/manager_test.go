@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mokexinxin/cpa-monitor/internal/mailer"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
@@ -102,11 +102,11 @@ func TestDisabledManagerDoesNothing(t *testing.T) {
 }
 
 type recordingSender struct {
-	reports []mailer.HealthReport
+	reports []notification.HealthReport
 	err     error
 }
 
-func (s *recordingSender) SendHealth(_ context.Context, report mailer.HealthReport) error {
+func (s *recordingSender) SendHealth(_ context.Context, report notification.HealthReport) error {
 	s.reports = append(s.reports, report)
 	return s.err
 }

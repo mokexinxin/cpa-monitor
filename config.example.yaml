@@ -16,6 +16,10 @@ thresholds:
 alerts:
   send_recovery: false
   state_file: state/alerts.json
+  # Supported values: smtp or dingtalk. Fallback is attempted only after the
+  # primary send fails; a successful fallback completes that occurrence.
+  primary_channel: dingtalk
+  fallback_channel: smtp
 
 # When enabled, the first completely healthy monitoring cycle sends a report
 # immediately. Later reports follow interval; failed deliveries use the shorter
@@ -24,6 +28,23 @@ health_report:
   enabled: true
   interval: 24h
   retry_interval: 15m
+  # Empty follows alerts.primary_channel. An explicit channel does not use the
+  # alert fallback.
+  channel: ""
+
+dingtalk:
+  # Copy only the access_token value from the custom robot Webhook into the
+  # environment. The endpoint itself is fixed by cpa-monitor.
+  webhook_token: ""
+  webhook_token_env: CPA_DINGTALK_WEBHOOK_TOKEN
+  signing_secret: ""
+  signing_secret_env: CPA_DINGTALK_SIGNING_SECRET
+  language: zh-CN
+  timeout: 10s
+  max_items: 10
+  at_user_ids: []
+  at_mobiles: []
+  at_all: false
 
 smtp:
   host: smtp.example.com

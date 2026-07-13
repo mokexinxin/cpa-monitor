@@ -12,6 +12,7 @@ import (
 	"github.com/mokexinxin/cpa-monitor/internal/cliproxy"
 	"github.com/mokexinxin/cpa-monitor/internal/collector"
 	"github.com/mokexinxin/cpa-monitor/internal/mailer"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
@@ -172,12 +173,12 @@ type lifecycleSender struct {
 	events        []mailer.Event
 }
 
-func (s *lifecycleSender) Send(_ context.Context, event mailer.Event) error {
+func (s *lifecycleSender) SendBatch(_ context.Context, batch notification.Batch) error {
 	s.attempts++
 	if s.failRemaining > 0 {
 		s.failRemaining--
 		return errors.New("SMTP unavailable")
 	}
-	s.events = append(s.events, event)
+	s.events = append(s.events, batch.Events...)
 	return nil
 }

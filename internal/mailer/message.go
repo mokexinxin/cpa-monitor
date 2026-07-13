@@ -11,48 +11,21 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 )
 
-// Kind identifies whether a message announces a newly active alert or a
-// recovery from one.
-type Kind string
+// These aliases preserve the public mail rendering API while the monitoring
+// core uses the transport-neutral notification model.
+type Kind = notification.Kind
 
 const (
-	Alert    Kind = "ALERT"
-	Recovery Kind = "RECOVERY"
+	Alert    = notification.Alert
+	Recovery = notification.Recovery
 )
 
-// Event contains transport-independent alert content.
-type Event struct {
-	Kind      Kind
-	Object    string
-	Hostname  string
-	Timestamp time.Time
-	Key       string
-	Current   string
-	Threshold string
-	Details   string
-	BaseURL   string
-}
-
-// HealthReport is the complete data model for a healthy-status email.
-type HealthReport struct {
-	Hostname               string
-	Timestamp              time.Time
-	NextScheduledAt        time.Time
-	BaseURL                string
-	MemoryUsedPercent      float64
-	MemoryThreshold        float64
-	HighestDiskUsedPercent float64
-	DiskMountCount         int
-	DiskThreshold          float64
-	TotalTCPConnections    int
-	TotalTCPThreshold      int
-	ServicePort            int
-	ServicePortConnections int
-	ServicePortThreshold   int
-	AccountCount           int
-}
+type Event = notification.Event
+type HealthReport = notification.HealthReport
 
 // BuildMessage constructs a multipart alert or recovery message with both
 // plain-text and HTML alternatives in the default Chinese language.

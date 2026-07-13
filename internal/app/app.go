@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/mokexinxin/cpa-monitor/internal/config"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 )
 
 type Runtime struct {
@@ -22,8 +24,9 @@ type Runtime struct {
 }
 
 type Dependencies struct {
-	LoadConfig func(string) (config.Config, error)
-	Build      func(config.Config, io.Writer) (*Runtime, error)
+	LoadConfig       func(string) (config.Config, error)
+	Build            func(config.Config, io.Writer) (*Runtime, error)
+	TestNotification func(context.Context, config.Config, string) error
 }
 
 // Run parses CLI arguments and maps startup/runtime outcomes to a process exit
@@ -45,6 +48,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, deps Depe
 	configPath := flags.String("config", "config.yaml", "path to YAML configuration")
 	once := flags.Bool("once", false, "run one full check cycle and exit")
 	checkConfig := flags.Bool("check-config", false, "validate configuration and exit")
+	testNotification := flags.String("test-notification", "", "send a test through primary, dingtalk, or smtp and exit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -54,6 +58,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, deps Depe
 	if flags.NArg() != 0 {
 		fmt.Fprintf(stderr, "cpa-monitor: %d unexpected positional argument(s)\n", flags.NArg())
 		return 2
+	}
+	if *testNotification != "" {
+		if *testNotification != "primary" && *testNotification != "dingtalk" && *testNotification != "smtp" {
+			fmt.Fprintln(stderr, "cpa-monitor: --test-notification must be primary, dingtalk, or smtp")
+			return 2
+		}
+		if *once || *checkConfig {
+			fmt.Fprintln(stderr, "cpa-monitor: --test-notification cannot be combined with --once or --check-config")
+			return 2
+		}
 	}
 	if deps.LoadConfig == nil {
 		fmt.Fprintln(stderr, "cpa-monitor: configuration loader is nil")
@@ -71,6 +85,18 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, deps Depe
 			return 1
 		}
 		fmt.Fprintln(stdout, "cpa-monitor: configuration is valid")
+		return 0
+	}
+	if *testNotification != "" {
+		if deps.TestNotification == nil {
+			fmt.Fprintln(stderr, "cpa-monitor: notification tester is nil")
+			return 1
+		}
+		if err := deps.TestNotification(ctx, cfg, *testNotification); err != nil {
+			fmt.Fprintf(stderr, "cpa-monitor: test notification failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "cpa-monitor: test notification sent successfully through %s\n", *testNotification)
 		return 0
 	}
 	if deps.Build == nil {
@@ -122,6 +148,45 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, deps Depe
 		return 1
 	}
 	return 0
+}
+
+func testNotification(ctx context.Context, cfg config.Config, target string) error {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var sender notification.AlertSender
+	var err error
+	if target == "primary" {
+		transports, buildErr := buildTransports(cfg, logger)
+		if buildErr != nil {
+			return buildErr
+		}
+		sender, err = buildAlertRouter(cfg, transports, logger)
+	} else {
+		if !cfg.UsesChannel(target) {
+			return fmt.Errorf("channel %q is not configured", target)
+		}
+		sender, _, err = buildChannel(cfg, target, logger)
+	}
+	if err != nil {
+		return err
+	}
+	if sender == nil {
+		return fmt.Errorf("channel %q is not available", target)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("read host name: %w", err)
+	}
+	now := time.Now().UTC()
+	event := notification.Event{
+		Kind: notification.Alert, Scope: "test", Object: "CPA Monitor notification test",
+		Hostname: hostname, Timestamp: now, Key: "test:notification", Current: "test",
+		Threshold: "not applicable", Details: "This is an explicit CPA Monitor test notification.",
+		BaseURL: cfg.CLIProxy.BaseURL,
+	}
+	return sender.SendBatch(ctx, notification.Batch{
+		Kind: event.Kind, Scope: event.Scope, Hostname: event.Hostname, Timestamp: event.Timestamp,
+		Events: []notification.Event{event},
+	})
 }
 
 func closeRuntime(runtime *Runtime) error {

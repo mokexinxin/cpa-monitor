@@ -125,6 +125,73 @@ func TestRunCheckConfigRejectsInvalidLoadedConfigWithoutBuildingRuntime(t *testi
 	}
 }
 
+func TestRunTestNotificationDoesNotBuildRuntime(t *testing.T) {
+	t.Parallel()
+	calledTarget := ""
+	buildCalled := false
+	deps := Dependencies{
+		LoadConfig: func(path string) (config.Config, error) {
+			if path != "notify.yaml" {
+				t.Fatalf("path = %q", path)
+			}
+			return config.Default(), nil
+		},
+		Build: func(config.Config, io.Writer) (*Runtime, error) {
+			buildCalled = true
+			return nil, errors.New("must not build")
+		},
+		TestNotification: func(_ context.Context, _ config.Config, target string) error {
+			calledTarget = target
+			return nil
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"--config", "notify.yaml", "--test-notification", "dingtalk"}, &stdout, &stderr, deps)
+	if code != 0 || calledTarget != "dingtalk" || buildCalled {
+		t.Fatalf("code=%d target=%q build=%t stderr=%q", code, calledTarget, buildCalled, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "successfully through dingtalk") {
+		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRejectsInvalidNotificationFlagCombinations(t *testing.T) {
+	t.Parallel()
+	for _, args := range [][]string{
+		{"--test-notification", "pager"},
+		{"--test-notification", "primary", "--once"},
+		{"--test-notification", "smtp", "--check-config"},
+	} {
+		var stderr bytes.Buffer
+		called := false
+		code := Run(context.Background(), args, io.Discard, &stderr, Dependencies{LoadConfig: func(string) (config.Config, error) {
+			called = true
+			return config.Config{}, nil
+		}})
+		if code != 2 || called {
+			t.Fatalf("args=%v code=%d loader called=%t stderr=%q", args, code, called, stderr.String())
+		}
+	}
+}
+
+func TestRunReportsTestNotificationFailure(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("delivery failed")
+	deps := Dependencies{
+		LoadConfig: func(string) (config.Config, error) { return config.Default(), nil },
+		TestNotification: func(context.Context, config.Config, string) error {
+			return sentinel
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), []string{"--test-notification", "primary"}, &stdout, &stderr, deps); code != 1 {
+		t.Fatalf("code = %d", code)
+	}
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), sentinel.Error()) {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunOnceReturnsNonzeroAfterRuntimeAndInitialErrors(t *testing.T) {
 	t.Parallel()
 

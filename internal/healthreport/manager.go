@@ -1,5 +1,5 @@
-// Package healthreport schedules healthy-status emails and persists their
-// delivery times so service restarts do not produce duplicate reports.
+// Package healthreport schedules healthy-status notifications and persists
+// their delivery times so service restarts do not produce duplicate reports.
 package healthreport
 
 import (
@@ -10,14 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mokexinxin/cpa-monitor/internal/mailer"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
-type Sender interface {
-	SendHealth(context.Context, mailer.HealthReport) error
-}
+type Sender = notification.HealthSender
 
 type Store interface {
 	HealthReport() state.HealthReportState
@@ -98,7 +96,7 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		return nil
 	}
 
-	report := mailer.HealthReport{
+	report := notification.HealthReport{
 		Hostname:               m.hostname,
 		Timestamp:              now,
 		NextScheduledAt:        now.Add(m.interval),

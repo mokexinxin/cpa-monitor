@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 )
 
 // Config controls SMTP delivery. Exactly one encrypted transport mode must be
@@ -113,6 +115,58 @@ func (m *Mailer) Send(ctx context.Context, event Event) error {
 	return m.send(ctx, message)
 }
 
+// SendBatch delivers one alert or recovery batch as one email. A single-item
+// batch retains the original email format; larger batches use a compact summary
+// so email fallback has the same delivery atomicity as DingTalk.
+func (m *Mailer) SendBatch(ctx context.Context, batch notification.Batch) error {
+	if ctx == nil {
+		return fmt.Errorf("SMTP context must not be nil")
+	}
+	if err := notification.ValidateBatch(batch); err != nil {
+		return err
+	}
+	if len(batch.Events) == 1 {
+		return m.Send(ctx, batch.Events[0])
+	}
+	message, err := BuildMessageInLanguage(m.config.From, m.config.To, batchSummaryEvent(batch, m.config.Language), m.config.Language)
+	if err != nil {
+		return err
+	}
+	return m.send(ctx, message)
+}
+
+func batchSummaryEvent(batch notification.Batch, language string) Event {
+	var details strings.Builder
+	for i, event := range batch.Events {
+		if i > 0 {
+			details.WriteString("\n\n")
+		}
+		fmt.Fprintf(&details, "[%s] %s\ncurrent=%s\nthreshold=%s", event.Key, event.Object, event.Current, event.Threshold)
+		if event.Details != "" {
+			details.WriteString("\n" + event.Details)
+		}
+	}
+	object := fmt.Sprintf("%s (%d conditions)", batch.Scope, len(batch.Events))
+	current := fmt.Sprintf("%d active conditions", len(batch.Events))
+	threshold := "multiple thresholds"
+	if batch.Kind == notification.Recovery {
+		current = fmt.Sprintf("%d recovered conditions", len(batch.Events))
+	}
+	if language == LanguageChinese {
+		object = fmt.Sprintf("%s（%d 项）", batch.Scope, len(batch.Events))
+		current = fmt.Sprintf("%d 项活动告警", len(batch.Events))
+		threshold = "多个阈值"
+		if batch.Kind == notification.Recovery {
+			current = fmt.Sprintf("%d 项已恢复", len(batch.Events))
+		}
+	}
+	return Event{
+		Kind: batch.Kind, Scope: batch.Scope, Object: object, Hostname: batch.Hostname,
+		Timestamp: batch.Timestamp, Key: batch.Scope + ":batch", Current: current,
+		Threshold: threshold, Details: details.String(), BaseURL: batch.Events[0].BaseURL,
+	}
+}
+
 // SendHealth constructs and delivers one scheduled healthy-status report.
 func (m *Mailer) SendHealth(ctx context.Context, report HealthReport) error {
 	if ctx == nil {
@@ -124,6 +178,11 @@ func (m *Mailer) SendHealth(ctx context.Context, report HealthReport) error {
 	}
 	return m.send(ctx, message)
 }
+
+var (
+	_ notification.AlertSender  = (*Mailer)(nil)
+	_ notification.HealthSender = (*Mailer)(nil)
+)
 
 func (m *Mailer) send(ctx context.Context, message []byte) error {
 	if err := ctx.Err(); err != nil {

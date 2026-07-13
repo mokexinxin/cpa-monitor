@@ -17,6 +17,7 @@ import (
 	"github.com/mokexinxin/cpa-monitor/internal/config"
 	"github.com/mokexinxin/cpa-monitor/internal/mailer"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
@@ -112,6 +113,9 @@ smtp:
 	if !slices.Equal(keys, want) {
 		t.Fatalf("alert keys = %#v, want %#v", keys, want)
 	}
+	if got, wantBatches := len(sender.batches), 4; got != wantBatches {
+		t.Fatalf("notification batches = %d, want %d (one per unhealthy scope)", got, wantBatches)
+	}
 	stored, err := state.Open(statePath)
 	if err != nil {
 		t.Fatal(err)
@@ -164,10 +168,12 @@ func (h *integrationHost) TCP(context.Context, int) (collector.TCPUsage, error) 
 }
 
 type integrationSender struct {
-	events []mailer.Event
+	batches []notification.Batch
+	events  []mailer.Event
 }
 
-func (s *integrationSender) Send(_ context.Context, event mailer.Event) error {
-	s.events = append(s.events, event)
+func (s *integrationSender) SendBatch(_ context.Context, batch notification.Batch) error {
+	s.batches = append(s.batches, batch)
+	s.events = append(s.events, batch.Events...)
 	return nil
 }

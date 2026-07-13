@@ -1,5 +1,6 @@
 // Package alerter reconciles current rule conditions with persisted active
-// alert state. State advances only after the corresponding email succeeds.
+// alert state. State advances only after the corresponding notification batch
+// succeeds.
 package alerter
 
 import (
@@ -11,15 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mokexinxin/cpa-monitor/internal/mailer"
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/rule"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
-// Sender is the narrow mail transport boundary used by Manager.
-type Sender interface {
-	Send(context.Context, mailer.Event) error
-}
+// Sender is the narrow notification boundary used by Manager.
+type Sender = notification.AlertSender
 
 // Store is the narrow active-alert state boundary used by Manager.
 type Store interface {
@@ -56,11 +55,10 @@ func NewManager(sender Sender, store Store, hostname, baseURL string, sendRecove
 }
 
 // Reconcile sends new alerts and, for a complete batch only, recovers active
-// keys missing from the batch. All operations are processed by key. A failed
-// operation does not prevent later keys from being attempted. If any in-memory
-// mutation succeeds, Save is attempted once after all operations. A failed
-// Save stays dirty and is retried at most once by the next valid batch without
-// resending already-active alerts.
+// keys missing from the batch. Each kind is delivered atomically as one batch,
+// with events sorted by key. If any in-memory mutation succeeds, Save is
+// attempted once. A failed Save stays dirty and is retried by the next valid
+// batch without resending already-active alerts.
 func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 	if m == nil {
 		return errors.New("reconcile alerts: nil manager")
@@ -86,66 +84,73 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 		activeByKey[record.Key] = record
 	}
 
-	operations := make([]operation, 0, len(conditions)+len(activeByKey))
+	newConditions := make([]rule.Condition, 0, len(conditions))
 	for key, condition := range conditions {
 		if _, alreadyActive := activeByKey[key]; alreadyActive {
 			continue
 		}
-		operations = append(operations, operation{
-			key:       key,
-			kind:      mailer.Alert,
-			condition: condition,
-		})
+		newConditions = append(newConditions, condition)
 	}
+	sort.Slice(newConditions, func(i, j int) bool { return newConditions[i].Key < newConditions[j].Key })
+
+	recovered := make([]state.Record, 0, len(activeByKey))
 	if batch.Complete {
 		for key, record := range activeByKey {
 			if _, stillUnhealthy := conditions[key]; stillUnhealthy {
 				continue
 			}
-			operations = append(operations, operation{
-				key:    key,
-				kind:   mailer.Recovery,
-				record: record,
-			})
+			recovered = append(recovered, record)
 		}
 	}
-	sort.Slice(operations, func(i, j int) bool {
-		if operations[i].key == operations[j].key {
-			return operations[i].kind < operations[j].kind
-		}
-		return operations[i].key < operations[j].key
-	})
+	sort.Slice(recovered, func(i, j int) bool { return recovered[i].Key < recovered[j].Key })
 
 	var reconcileErrors []error
 	mutated := false
-	for _, operation := range operations {
-		if err := ctx.Err(); err != nil {
-			reconcileErrors = append(reconcileErrors, err)
-			break
+	if len(newConditions) > 0 {
+		timestamp := m.timestamp()
+		events := make([]notification.Event, 0, len(newConditions))
+		for _, condition := range newConditions {
+			events = append(events, m.alertEvent(condition, timestamp))
 		}
-
-		switch operation.kind {
-		case mailer.Alert:
-			timestamp := m.timestamp()
-			if err := m.sender.Send(ctx, m.alertEvent(operation.condition, timestamp)); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("send alert %q: %w", operation.key, err))
-				continue
-			}
-			if err := m.store.Put(recordFromCondition(operation.condition, timestamp)); err != nil {
-				reconcileErrors = append(reconcileErrors, fmt.Errorf("activate alert %q: %w", operation.key, err))
-				continue
-			}
-			mutated = true
-
-		case mailer.Recovery:
-			if m.sendRecovery {
-				if err := m.sender.Send(ctx, m.recoveryEvent(operation.record, m.timestamp())); err != nil {
-					reconcileErrors = append(reconcileErrors, fmt.Errorf("send recovery %q: %w", operation.key, err))
+		notificationBatch := notification.Batch{
+			Kind: notification.Alert, Scope: batch.Scope, Hostname: m.hostname,
+			Timestamp: timestamp, Events: events,
+		}
+		if err := m.sender.SendBatch(ctx, notificationBatch); err != nil {
+			reconcileErrors = append(reconcileErrors, fmt.Errorf("send alert batch for scope %q keys %q: %w", batch.Scope, eventKeys(events), err))
+		} else {
+			for _, condition := range newConditions {
+				if err := m.store.Put(recordFromCondition(condition, timestamp)); err != nil {
+					reconcileErrors = append(reconcileErrors, fmt.Errorf("activate alert %q: %w", condition.Key, err))
 					continue
 				}
-			}
-			if m.store.Delete(operation.key) {
 				mutated = true
+			}
+		}
+	}
+
+	if len(recovered) > 0 {
+		delivered := true
+		if m.sendRecovery {
+			timestamp := m.timestamp()
+			events := make([]notification.Event, 0, len(recovered))
+			for _, record := range recovered {
+				events = append(events, m.recoveryEvent(record, timestamp))
+			}
+			notificationBatch := notification.Batch{
+				Kind: notification.Recovery, Scope: batch.Scope, Hostname: m.hostname,
+				Timestamp: timestamp, Events: events,
+			}
+			if err := m.sender.SendBatch(ctx, notificationBatch); err != nil {
+				delivered = false
+				reconcileErrors = append(reconcileErrors, fmt.Errorf("send recovery batch for scope %q keys %q: %w", batch.Scope, eventKeys(events), err))
+			}
+		}
+		if delivered {
+			for _, record := range recovered {
+				if m.store.Delete(record.Key) {
+					mutated = true
+				}
 			}
 		}
 	}
@@ -163,11 +168,12 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 	return errors.Join(reconcileErrors...)
 }
 
-type operation struct {
-	key       string
-	kind      mailer.Kind
-	condition rule.Condition
-	record    state.Record
+func eventKeys(events []notification.Event) []string {
+	keys := make([]string, len(events))
+	for i, event := range events {
+		keys[i] = event.Key
+	}
+	return keys
 }
 
 func (m *Manager) validate(ctx context.Context, batch rule.Batch) error {
@@ -213,9 +219,10 @@ func (m *Manager) timestamp() time.Time {
 	return now().UTC()
 }
 
-func (m *Manager) alertEvent(condition rule.Condition, timestamp time.Time) mailer.Event {
-	return mailer.Event{
-		Kind:      mailer.Alert,
+func (m *Manager) alertEvent(condition rule.Condition, timestamp time.Time) notification.Event {
+	return notification.Event{
+		Kind:      notification.Alert,
+		Scope:     condition.Scope,
 		Object:    objectName(condition.Summary, condition.Key),
 		Hostname:  m.hostname,
 		Timestamp: timestamp,
@@ -227,9 +234,10 @@ func (m *Manager) alertEvent(condition rule.Condition, timestamp time.Time) mail
 	}
 }
 
-func (m *Manager) recoveryEvent(record state.Record, timestamp time.Time) mailer.Event {
-	return mailer.Event{
-		Kind:      mailer.Recovery,
+func (m *Manager) recoveryEvent(record state.Record, timestamp time.Time) notification.Event {
+	return notification.Event{
+		Kind:      notification.Recovery,
+		Scope:     record.Scope,
 		Object:    objectName(record.Summary, record.Key) + " recovered",
 		Hostname:  m.hostname,
 		Timestamp: timestamp,

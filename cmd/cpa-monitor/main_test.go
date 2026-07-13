@@ -13,7 +13,7 @@ func TestRunHelp(t *testing.T) {
 	if code := run([]string{"--help"}, io.Discard, &stderr); code != 0 {
 		t.Fatalf("run() code = %d", code)
 	}
-	if !strings.Contains(stderr.String(), "Usage") || !strings.Contains(stderr.String(), "-once") || !strings.Contains(stderr.String(), "-check-config") {
+	if !strings.Contains(stderr.String(), "Usage") || !strings.Contains(stderr.String(), "-once") || !strings.Contains(stderr.String(), "-check-config") || !strings.Contains(stderr.String(), "-test-notification") {
 		t.Fatalf("help output = %q", stderr.String())
 	}
 }

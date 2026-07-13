@@ -56,6 +56,49 @@ func TestBuildRuntimeWithoutFileLogging(t *testing.T) {
 	}
 }
 
+func TestBuildRuntimeDingTalkOnlyDoesNotRequireSMTP(t *testing.T) {
+	t.Parallel()
+	cfg := validRuntimeConfig(t.TempDir())
+	cfg.Alerts.PrimaryChannel = "dingtalk"
+	cfg.SMTP = config.SMTPConfig{}
+	cfg.DingTalk.WebhookToken = "test-token"
+	cfg.DingTalk.SigningSecret = "test-secret"
+	runtime, err := buildRuntime(cfg, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Runner == nil {
+		t.Fatal("runtime has no runner")
+	}
+	if err := closeRuntime(runtime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBuildTransportsOnlyConstructsReferencedChannels(t *testing.T) {
+	t.Parallel()
+	cfg := validRuntimeConfig(t.TempDir())
+	transports, err := buildTransports(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transports.alert["smtp"] == nil || transports.alert["dingtalk"] != nil {
+		t.Fatalf("SMTP-only transports = %#v", transports.alert)
+	}
+
+	cfg.Alerts.PrimaryChannel = "dingtalk"
+	cfg.Alerts.FallbackChannel = "smtp"
+	cfg.DingTalk.WebhookToken = "test-token"
+	cfg.DingTalk.SigningSecret = "test-secret"
+	transports, err = buildTransports(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transports.alert["smtp"] == nil || transports.alert["dingtalk"] == nil {
+		t.Fatalf("primary/fallback transports = %#v", transports.alert)
+	}
+}
+
 func validRuntimeConfig(dir string) config.Config {
 	cfg := config.Default()
 	cfg.CLIProxy.ManagementKey = "management-key"

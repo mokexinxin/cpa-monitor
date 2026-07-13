@@ -34,6 +34,7 @@ type Config struct {
 	Alerts       AlertsConfig       `yaml:"alerts"`
 	HealthReport HealthReportConfig `yaml:"health_report"`
 	SMTP         SMTPConfig         `yaml:"smtp"`
+	DingTalk     DingTalkConfig     `yaml:"dingtalk"`
 	Logging      LoggingConfig      `yaml:"logging"`
 }
 
@@ -56,17 +57,20 @@ type ThresholdsConfig struct {
 
 // AlertsConfig controls recovery notifications and persistent deduplication.
 type AlertsConfig struct {
-	SendRecovery bool   `yaml:"send_recovery"`
-	StateFile    string `yaml:"state_file"`
+	SendRecovery    bool   `yaml:"send_recovery"`
+	StateFile       string `yaml:"state_file"`
+	PrimaryChannel  string `yaml:"primary_channel"`
+	FallbackChannel string `yaml:"fallback_channel"`
 }
 
-// HealthReportConfig controls scheduled healthy-status email delivery. It is
+// HealthReportConfig controls scheduled healthy-status notification delivery. It is
 // disabled by default so upgrading an existing configuration never starts a
 // new class of email without an explicit choice.
 type HealthReportConfig struct {
 	Enabled       bool     `yaml:"enabled"`
 	Interval      Duration `yaml:"interval"`
 	RetryInterval Duration `yaml:"retry_interval"`
+	Channel       string   `yaml:"channel"`
 }
 
 // SMTPConfig controls localized authenticated SMTP delivery. Exactly one of
@@ -84,6 +88,22 @@ type SMTPConfig struct {
 	StartTLS    bool     `yaml:"starttls"`
 	TLS         bool     `yaml:"tls"`
 	Timeout     Duration `yaml:"timeout"`
+}
+
+// DingTalkConfig controls delivery through one signed DingTalk custom group
+// robot. Only the access token is configurable; the API endpoint is fixed so
+// configuration cannot turn the monitor into an arbitrary HTTP client.
+type DingTalkConfig struct {
+	WebhookToken     string   `yaml:"webhook_token"`
+	WebhookTokenEnv  string   `yaml:"webhook_token_env"`
+	SigningSecret    string   `yaml:"signing_secret"`
+	SigningSecretEnv string   `yaml:"signing_secret_env"`
+	Language         string   `yaml:"language"`
+	Timeout          Duration `yaml:"timeout"`
+	MaxItems         int      `yaml:"max_items"`
+	AtUserIDs        []string `yaml:"at_user_ids"`
+	AtMobiles        []string `yaml:"at_mobiles"`
+	AtAll            bool     `yaml:"at_all"`
 }
 
 // LoggingConfig controls structured log filtering and optional bounded files.
@@ -118,7 +138,8 @@ func Default() Config {
 			ServicePortConnections: 800,
 		},
 		Alerts: AlertsConfig{
-			StateFile: defaultStateFile,
+			StateFile:      defaultStateFile,
+			PrimaryChannel: "smtp",
 		},
 		HealthReport: HealthReportConfig{
 			Interval:      Duration{Duration: 24 * time.Hour},
@@ -129,6 +150,11 @@ func Default() Config {
 			Language: "zh-CN",
 			StartTLS: true,
 			Timeout:  Duration{Duration: 10 * time.Second},
+		},
+		DingTalk: DingTalkConfig{
+			Language: "zh-CN",
+			Timeout:  Duration{Duration: 10 * time.Second},
+			MaxItems: 10,
 		},
 		Logging: LoggingConfig{
 			Level: "info",
@@ -171,6 +197,13 @@ func LoadWithEnv(path string, lookupEnv func(string) (string, bool)) (Config, er
 		lookupEnv = func(string) (string, bool) { return "", false }
 	}
 	cfg.applyEnvironment(lookupEnv)
+	cfg.Alerts.PrimaryChannel = normalizeChannel(cfg.Alerts.PrimaryChannel)
+	cfg.Alerts.FallbackChannel = normalizeChannel(cfg.Alerts.FallbackChannel)
+	cfg.HealthReport.Channel = normalizeChannel(cfg.HealthReport.Channel)
+	cfg.SMTP.Language = normalizeLanguage(cfg.SMTP.Language)
+	cfg.DingTalk.Language = normalizeLanguage(cfg.DingTalk.Language)
+	cfg.DingTalk.AtUserIDs = normalizeStringList(cfg.DingTalk.AtUserIDs)
+	cfg.DingTalk.AtMobiles = normalizeStringList(cfg.DingTalk.AtMobiles)
 	cfg.Logging.Level = strings.ToLower(strings.TrimSpace(cfg.Logging.Level))
 
 	if err := cfg.Validate(); err != nil {
@@ -195,6 +228,16 @@ func (c *Config) applyEnvironment(lookupEnv func(string) (string, bool)) {
 			c.SMTP.Password = value
 		}
 	}
+	if c.DingTalk.WebhookTokenEnv != "" {
+		if value, ok := lookupEnv(c.DingTalk.WebhookTokenEnv); ok {
+			c.DingTalk.WebhookToken = value
+		}
+	}
+	if c.DingTalk.SigningSecretEnv != "" {
+		if value, ok := lookupEnv(c.DingTalk.SigningSecretEnv); ok {
+			c.DingTalk.SigningSecret = value
+		}
+	}
 }
 
 // Validate checks all invariants without including credential values in an
@@ -205,12 +248,6 @@ func (c Config) Validate() error {
 	}
 	if c.CLIProxy.Timeout.Duration <= 0 {
 		return errors.New("cliproxy.timeout must be greater than zero")
-	}
-	if c.SMTP.Timeout.Duration <= 0 {
-		return errors.New("smtp.timeout must be greater than zero")
-	}
-	if c.SMTP.Language != "zh-CN" && c.SMTP.Language != "en" {
-		return errors.New("smtp.language must be zh-CN or en")
 	}
 	if err := validatePercent("thresholds.memory_percent", c.Thresholds.MemoryPercent); err != nil {
 		return err
@@ -245,41 +282,37 @@ func (c Config) Validate() error {
 		return errors.New("cliproxy management key must not contain line breaks")
 	}
 
-	if !validSMTPHost(c.SMTP.Host) {
-		return errors.New("smtp.host must be a valid hostname or IP address without a port")
-	}
-	if c.SMTP.Port < 1 || c.SMTP.Port > 65535 {
-		return errors.New("smtp.port must be between 1 and 65535")
-	}
-	if !validMailbox(c.SMTP.From) {
-		return errors.New("smtp.from must be a valid email address")
-	}
-	if len(c.SMTP.To) == 0 {
-		return errors.New("smtp.to must contain at least one email address")
-	}
-	for _, recipient := range c.SMTP.To {
-		// Do not place a recipient value in the error. Although email addresses
-		// are not authentication secrets, value-free validation errors are safer
-		// to log in shared environments.
-		if !validMailbox(recipient) {
-			return errors.New("smtp.to contains an invalid email address")
-		}
-	}
-	if (c.SMTP.Username == "") != (c.SMTP.Password == "") {
-		return errors.New("smtp authentication username and password must both be set or both be empty")
-	}
-	if c.SMTP.StartTLS == c.SMTP.TLS {
-		return errors.New("smtp.starttls and smtp.tls: exactly one mode must be enabled")
-	}
-
 	if strings.TrimSpace(c.Alerts.StateFile) == "" {
 		return errors.New("alerts.state_file must not be empty")
+	}
+	if !validChannel(c.Alerts.PrimaryChannel) {
+		return errors.New("alerts.primary_channel must be smtp or dingtalk")
+	}
+	if c.Alerts.FallbackChannel != "" && !validChannel(c.Alerts.FallbackChannel) {
+		return errors.New("alerts.fallback_channel must be empty, smtp, or dingtalk")
+	}
+	if c.Alerts.FallbackChannel == c.Alerts.PrimaryChannel {
+		return errors.New("alerts.fallback_channel must differ from alerts.primary_channel")
+	}
+	if c.HealthReport.Channel != "" && !validChannel(c.HealthReport.Channel) {
+		return errors.New("health_report.channel must be empty, smtp, or dingtalk")
 	}
 	if c.HealthReport.Interval.Duration <= 0 {
 		return errors.New("health_report.interval must be greater than zero")
 	}
 	if c.HealthReport.RetryInterval.Duration <= 0 {
 		return errors.New("health_report.retry_interval must be greater than zero")
+	}
+
+	if c.UsesChannel("smtp") {
+		if err := validateSMTP(c.SMTP); err != nil {
+			return err
+		}
+	}
+	if c.UsesChannel("dingtalk") {
+		if err := validateDingTalk(c.DingTalk); err != nil {
+			return err
+		}
 	}
 	if _, ok := map[string]struct{}{"debug": {}, "info": {}, "warn": {}, "error": {}}[c.Logging.Level]; !ok {
 		return errors.New("logging.level must be one of debug, info, warn, or error")
@@ -302,6 +335,130 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// HealthReportChannel returns the configured health-report transport, or the
+// alert primary channel when health_report.channel is omitted.
+func (c Config) HealthReportChannel() string {
+	if c.HealthReport.Channel != "" {
+		return c.HealthReport.Channel
+	}
+	return c.Alerts.PrimaryChannel
+}
+
+// UsesChannel reports whether runtime construction needs the named transport.
+func (c Config) UsesChannel(channel string) bool {
+	if c.Alerts.PrimaryChannel == channel || c.Alerts.FallbackChannel == channel {
+		return true
+	}
+	return c.HealthReport.Enabled && c.HealthReportChannel() == channel
+}
+
+func validateSMTP(c SMTPConfig) error {
+	if c.Timeout.Duration <= 0 {
+		return errors.New("smtp.timeout must be greater than zero")
+	}
+	if c.Language != "zh-CN" && c.Language != "en" {
+		return errors.New("smtp.language must be zh-CN or en")
+	}
+	if !validSMTPHost(c.Host) {
+		return errors.New("smtp.host must be a valid hostname or IP address without a port")
+	}
+	if c.Port < 1 || c.Port > 65535 {
+		return errors.New("smtp.port must be between 1 and 65535")
+	}
+	if !validMailbox(c.From) {
+		return errors.New("smtp.from must be a valid email address")
+	}
+	if len(c.To) == 0 {
+		return errors.New("smtp.to must contain at least one email address")
+	}
+	for _, recipient := range c.To {
+		if !validMailbox(recipient) {
+			return errors.New("smtp.to contains an invalid email address")
+		}
+	}
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("smtp authentication username and password must both be set or both be empty")
+	}
+	if c.StartTLS == c.TLS {
+		return errors.New("smtp.starttls and smtp.tls: exactly one mode must be enabled")
+	}
+	return nil
+}
+
+func validateDingTalk(c DingTalkConfig) error {
+	if c.Timeout.Duration <= 0 {
+		return errors.New("dingtalk.timeout must be greater than zero")
+	}
+	if c.Language != "zh-CN" && c.Language != "en" {
+		return errors.New("dingtalk.language must be zh-CN or en")
+	}
+	if c.MaxItems < 1 || c.MaxItems > 50 {
+		return errors.New("dingtalk.max_items must be between 1 and 50")
+	}
+	if c.AtAll && (len(c.AtUserIDs) != 0 || len(c.AtMobiles) != 0) {
+		return errors.New("dingtalk.at_all cannot be combined with at_user_ids or at_mobiles")
+	}
+	if strings.TrimSpace(c.WebhookToken) == "" {
+		return errors.New("dingtalk webhook token must not be empty")
+	}
+	if strings.TrimSpace(c.SigningSecret) == "" {
+		return errors.New("dingtalk signing secret must not be empty")
+	}
+	if containsUnsafeValue(c.WebhookToken) {
+		return errors.New("dingtalk webhook token contains invalid characters")
+	}
+	if containsUnsafeValue(c.SigningSecret) {
+		return errors.New("dingtalk signing secret contains invalid characters")
+	}
+	for _, value := range append(append([]string(nil), c.AtUserIDs...), c.AtMobiles...) {
+		if containsUnsafeValue(value) {
+			return errors.New("dingtalk mention lists contain invalid characters")
+		}
+	}
+	return nil
+}
+
+func validChannel(channel string) bool { return channel == "smtp" || channel == "dingtalk" }
+
+func normalizeChannel(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
+
+func normalizeLanguage(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "zh-cn") {
+		return "zh-CN"
+	}
+	return strings.ToLower(value)
+}
+
+func normalizeStringList(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func containsUnsafeValue(value string) bool {
+	if value != strings.TrimSpace(value) {
+		return true
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return true
+		}
+	}
+	return false
 }
 
 func validatePercent(name string, value float64) error {

@@ -4,7 +4,7 @@
 
 `cpa-monitor` is a standalone Go monitoring service for Linux hosts running CLIProxyAPI. It lives in its own repository, does not import CLIProxyAPI packages, and does not require changes to CLIProxyAPI.
 
-The monitor checks host resources, network connection counts, CLIProxyAPI liveness, and CLIProxyAPI account status. It sends email alerts through a configurable SMTP service. Alerts are deduplicated so a condition sends mail only when it changes from healthy to unhealthy; the same condition can alert again only after it has recovered.
+The monitor checks host resources, network connection counts, CLIProxyAPI liveness, and CLIProxyAPI account status. It sends notifications through a signed DingTalk custom group robot, SMTP, or an ordered primary/fallback route. Alerts are deduplicated so a condition sends only when it changes from healthy to unhealthy; the same condition can alert again only after it has recovered.
 
 ## Existing CLIProxyAPI Interfaces
 
@@ -35,7 +35,7 @@ The monitor will use this Management API response to detect account quota or ava
 - Monitor real disk mount usage and alert when any mount exceeds 80% by default.
 - Monitor total host TCP connections and CLIProxyAPI service-port TCP connections.
 - Monitor account availability through `/v0/management/auth-files`.
-- Send SMTP email alerts with the affected resource or account clearly identified.
+- Send transport-neutral notifications with the affected resource or account clearly identified.
 - Support a long-running daemon mode and a `--once` mode for cron or systemd timers.
 - Keep all behavior configurable through YAML with environment variable overrides for secrets.
 - Write optional local logs with strict size limits and rotation.
@@ -67,6 +67,8 @@ cpa-monitor/
   internal/config/
   internal/logfile/
   internal/mailer/
+  internal/dingtalk/
+  internal/notification/
   internal/rule/
   internal/state/
   config.example.yaml
@@ -112,6 +114,12 @@ thresholds:
 alerts:
   send_recovery: false
   state_file: state/alerts.json
+  primary_channel: dingtalk
+  fallback_channel: smtp
+
+dingtalk:
+  webhook_token_env: CPA_DINGTALK_WEBHOOK_TOKEN
+  signing_secret_env: CPA_DINGTALK_SIGNING_SECRET
 
 smtp:
   host: smtp.example.com
@@ -145,9 +153,11 @@ Defaults:
 - `thresholds.total_tcp_connections`: `3000`
 - `thresholds.service_port_connections`: `800`
 - `alerts.send_recovery`: `false`
+- `alerts.primary_channel`: `smtp` for backward compatibility
+- `alerts.fallback_channel`: empty
 - `logging.file.enabled`: `false`
 
-`management_key_env`, `username_env`, and `password_env` override inline values when their environment variables are set.
+Secret `*_env` fields override inline values when their environment variables are set. DingTalk token and signing secret should remain in the restricted environment file, not YAML.
 
 If `cliproxy.service_port` is `0`, the monitor derives the service port from `cliproxy.base_url`.
 
@@ -179,7 +189,7 @@ The Linux collector reads mount information from `/proc/self/mountinfo` or `/pro
 
 The default skip list is `proc`, `sysfs`, `tmpfs`, `devtmpfs`, `devpts`, `cgroup`, `cgroup2`, `overlay`, `squashfs`, `securityfs`, `debugfs`, `tracefs`, `fusectl`, `mqueue`, `pstore`, `autofs`, `binfmt_misc`, `bpf`, `configfs`, `hugetlbfs`, and `nsfs`. Mounts with other filesystem types are monitored.
 
-An alert is raised for each mount whose usage is greater than or equal to `thresholds.disk_percent`. The email lists mount point, filesystem type, used bytes, total bytes, and usage percent.
+An alert is raised for each mount whose usage is greater than or equal to `thresholds.disk_percent`. The notification lists mount point, filesystem type, used bytes, total bytes, and usage percent.
 
 ### Network Connections
 
@@ -247,7 +257,7 @@ network:service_port:<port>
 auth:<auth_index>
 ```
 
-Stable keys allow the alert state store to suppress repeated emails for the same ongoing condition.
+Stable keys allow the alert state store to suppress repeated notifications for the same ongoing condition.
 
 ## Alert State
 
@@ -257,18 +267,34 @@ The monitor persists alert state in JSON, defaulting to:
 state/alerts.json
 ```
 
-State writes use a temporary file followed by atomic rename. If an alert email fails to send, the alert is not marked active, so the next cycle retries.
+State writes use a temporary file followed by atomic rename. If both the primary and optional fallback delivery fail, the alert is not marked active, so the next cycle retries.
 
 Default behavior:
 
-- send mail when an alert key changes from healthy to unhealthy
-- do not send repeated mail while it remains unhealthy
+- send a notification when an alert key changes from healthy to unhealthy
+- do not send repeatedly while it remains unhealthy
 - remove the key after recovery
-- do not send recovery mail by default
+- do not send recovery notifications by default
 
-If `alerts.send_recovery` is true, the monitor also sends one recovery email when a previously active alert becomes healthy.
+If `alerts.send_recovery` is true, the monitor also sends one recovery notification when a previously active alert becomes healthy.
 
-## Email Design
+## Notification Delivery Design
+
+The alerter emits transport-neutral alert/recovery batches. All new conditions
+of the same scope and kind in one cycle are delivered together, reducing
+DingTalk traffic while preserving per-key state. The primary sender is tried
+first. Fallback is attempted only after primary failure; fallback success is a
+completed occurrence and is not replayed to the primary later.
+
+DingTalk delivery uses the fixed custom robot endpoint, HMAC-SHA256 signature
+security, Markdown messages, and optional user/mobile/all mentions. Only HTTP
+2xx with API `errcode: 0` is success. A `410100` response starts a ten-minute
+local cooldown. `dingtalk.max_items` limits rendered detail, not state updates.
+
+Health reports default to the alert primary channel or select an explicit
+channel; they do not use the alert fallback.
+
+### SMTP Email
 
 SMTP settings are configurable. The mailer supports:
 
@@ -312,7 +338,7 @@ Rotation deletes the oldest files until all limits are satisfied. The monitor ch
 - Configuration errors fail fast with clear messages.
 - Linux-only collectors return clear unsupported-platform errors outside Linux.
 - Health and Management API errors are logged with context.
-- SMTP send failures are logged and leave the alert unsent in state.
+- notification send failures are logged and leave the alert unsent in state.
 - State file write failures are logged; the program continues, but deduplication may be less reliable.
 - One failed collector does not block other collectors from running in the same cycle.
 
@@ -328,13 +354,15 @@ Unit tests:
 - Management API response parsing and account rule matching
 - alert state transitions and atomic state persistence
 - SMTP message construction
+- DingTalk signing, Markdown rendering, API errors, redaction, and cooldown
+- primary/fallback routing and per-scope batching
 - log rotation limits
 
 Integration-style tests:
 
 - fake CLIProxyAPI HTTP server for `/healthz` and `/v0/management/auth-files`
-- `--once` execution with mocked collectors and mailer
-- failed SMTP send keeps alert eligible for retry
+- `--once` execution with mocked collectors and notification senders
+- failed primary and fallback delivery keeps alerts eligible for retry
 
 Linux-specific tests will be isolated with build tags or filesystem fixtures so development on macOS can still run non-Linux tests.
 
@@ -357,7 +385,7 @@ go test ./...
 - long-running systemd service example
 - `systemd timer` example using `--once`
 - cron example using `--once`
-- SMTP configuration examples
+- DingTalk-only, SMTP-only, and primary/fallback examples
 - CLIProxyAPI Management API key setup notes
 
 ## Acceptance Criteria
@@ -370,6 +398,6 @@ go test ./...
 - It checks `/v0/management/auth-files` and sends account-specific alerts for unavailable or quota-like accounts.
 - It alerts when memory or any real disk mount reaches 80% by default.
 - It alerts when total TCP connections reach 3000 or service-port connections reach 800 by default.
-- It sends SMTP email using YAML settings with environment variable overrides.
+- It sends DingTalk and/or SMTP notifications using YAML settings with environment variable overrides.
 - It deduplicates alerts until recovery.
 - It supports optional local file logging with strict size limits.

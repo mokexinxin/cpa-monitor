@@ -184,11 +184,22 @@ make_fake_binary() {
     cat >"$path" <<EOF
 #!/usr/bin/env bash
 # fake cpa-monitor fixture: ${version}
-for argument in "\$@"; do
-    case "\$argument" in
-        --help|--check-config) exit 0 ;;
-    esac
+check_config=false
+config_path=""
+while (( \$# > 0 )); do
+	case "\$1" in
+		--help) exit 0 ;;
+		--check-config) check_config=true; shift ;;
+		--config) config_path="\${2:-}"; shift 2 ;;
+		*) shift ;;
+	esac
 done
+if [[ "\$check_config" == "true" ]]; then
+	if [[ -n "\$config_path" ]] && grep -Eq "primary_channel: ['\"]?dingtalk" "\$config_path"; then
+		[[ -n "\${CPA_DINGTALK_WEBHOOK_TOKEN:-}" && -n "\${CPA_DINGTALK_SIGNING_SECRET:-}" ]] || exit 65
+	fi
+	exit 0
+fi
 exit 64
 EOF
     chmod 0755 "$path"
@@ -541,6 +552,51 @@ test_generated_quoting_and_weird_root() {
     assert_not_contains "$trace_output" "$secret"
 }
 
+test_dingtalk_only_install_keeps_secrets_out_of_yaml() {
+	local case_dir
+	local root
+	local binary
+	local output
+	local config
+	local environment
+	local token='ding-token-must-stay-secret'
+	local secret='SEC-signing-secret-must-stay-secret'
+	case_dir="$(new_case_dir)"
+	root="${case_dir}/root"
+	binary="${case_dir}/cpa-monitor"
+	output="${case_dir}/install.out"
+	make_fake_binary "$binary" dingtalk-only
+
+	clean_env \
+		CPA_MONITOR_MANAGEMENT_KEY='management-key' \
+		CPA_MONITOR_ALERT_PRIMARY_CHANNEL='dingtalk' \
+		CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN="$token" \
+		CPA_MONITOR_DINGTALK_SIGNING_SECRET="$secret" \
+		CPA_MONITOR_DINGTALK_AT_USER_IDS='user-a, user-a, ,user-b' \
+		CPA_MONITOR_DINGTALK_AT_MOBILES='13800000000, 13800000000' \
+		"$BASH_BIN" "$INSTALLER" \
+		--root "$root" --binary "$binary" --non-interactive --no-start >"$output" 2>&1 \
+		|| fail "DingTalk-only installation failed"
+
+	config="${root}/etc/cpa-monitor/config.yaml"
+	environment="${root}/etc/cpa-monitor/cpa-monitor.env"
+	assert_contains "$config" "primary_channel: 'dingtalk'"
+	assert_contains "$config" 'dingtalk:'
+	assert_contains "$config" 'webhook_token_env: CPA_DINGTALK_WEBHOOK_TOKEN'
+	assert_contains "$config" "    - 'user-a'"
+	assert_contains "$config" "    - 'user-b'"
+	assert_contains "$config" "    - '13800000000'"
+	assert_eq 1 "$(grep -Fxc "    - 'user-a'" "$config")" 'DingTalk user IDs were not deduplicated'
+	assert_not_contains "$config" 'smtp:'
+	assert_not_contains "$config" "$token"
+	assert_not_contains "$config" "$secret"
+	assert_not_contains "$output" "$token"
+	assert_not_contains "$output" "$secret"
+	assert_contains "$environment" "CPA_DINGTALK_WEBHOOK_TOKEN=\"${token}\""
+	assert_contains "$environment" "CPA_DINGTALK_SIGNING_SECRET=\"${secret}\""
+	assert_mode 600 "$environment"
+}
+
 test_no_start_skips_config_check() {
     local case_dir
     local root
@@ -688,18 +744,22 @@ test_invalid_and_missing_input_leave_no_files() {
     local missing_root
     local invalid_root
     local invalid_language_root
+    local invalid_mentions_root
     local missing_output
     local invalid_output
     local invalid_language_output
+    local invalid_mentions_output
     local status
     case_dir="$(new_case_dir)"
     binary="${case_dir}/cpa-monitor"
     missing_root="${case_dir}/missing-root"
     invalid_root="${case_dir}/invalid-root"
     invalid_language_root="${case_dir}/invalid-language-root"
+    invalid_mentions_root="${case_dir}/invalid-mentions-root"
     missing_output="${case_dir}/missing.out"
     invalid_output="${case_dir}/invalid.out"
     invalid_language_output="${case_dir}/invalid-language.out"
+    invalid_mentions_output="${case_dir}/invalid-mentions.out"
     make_fake_binary "$binary" validation
 
     set +e
@@ -749,6 +809,25 @@ test_invalid_and_missing_input_leave_no_files() {
     assert_nonzero "$status" "invalid email language should fail"
     assert_contains "$invalid_language_output" 'CPA_MONITOR_EMAIL_LANGUAGE must be zh-CN or en'
     assert_not_exists "$invalid_language_root"
+
+    set +e
+    clean_env \
+        CPA_MONITOR_MANAGEMENT_KEY='valid-key' \
+        CPA_MONITOR_ALERT_PRIMARY_CHANNEL='dingtalk' \
+        CPA_MONITOR_DINGTALK_WEBHOOK_TOKEN='token' \
+        CPA_MONITOR_DINGTALK_SIGNING_SECRET='secret' \
+        CPA_MONITOR_DINGTALK_AT_ALL='true' \
+        CPA_MONITOR_DINGTALK_AT_USER_IDS='user-a' \
+        "$BASH_BIN" "$INSTALLER" \
+        --root "$invalid_mentions_root" \
+        --binary "$binary" \
+        --non-interactive \
+        --no-start >"$invalid_mentions_output" 2>&1
+    status=$?
+    set -e
+    assert_nonzero "$status" "DingTalk at-all mention conflict should fail"
+    assert_contains "$invalid_mentions_output" 'cannot be combined with individual user IDs or mobiles'
+    assert_not_exists "$invalid_mentions_root"
 }
 
 test_systemctl_failure_rolls_back_files() {
@@ -934,6 +1013,7 @@ run_test 'bash syntax and help' test_syntax_and_help
 run_test 'isolated first install and daemon systemctl flow' test_staged_first_install_and_daemon_activation
 run_test 'timer systemctl flow' test_timer_activation
 run_test 'generated YAML/environment quoting and weird root' test_generated_quoting_and_weird_root
+run_test 'DingTalk-only install keeps secrets out of YAML' test_dingtalk_only_install_keeps_secrets_out_of_yaml
 run_test '--no-start skips runtime config check' test_no_start_skips_config_check
 run_test 'preserve existing config and create unique backups' test_preserve_and_unique_backups
 run_test 'reject managed symlink targets' test_symlink_target_rejected
