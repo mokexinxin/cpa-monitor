@@ -3,6 +3,8 @@ package dingtalk
 import (
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -12,9 +14,13 @@ import (
 )
 
 const (
-	maxFieldRunes    = 1500
-	maxMarkdownRunes = 18000
+	maxFieldRunes             = 1500
+	maxMarkdownRunes          = 18000
+	quotaAttentionPercent     = 75.0
+	compactQuotaProgressSteps = 10
 )
+
+var beijingTime = time.FixedZone("Beijing Time", 8*60*60)
 
 type markdownPayload struct {
 	MessageType string          `json:"msgtype"`
@@ -103,23 +109,8 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 	var text strings.Builder
 	writeMentions(&text, at)
 	if language == "zh-CN" {
-		title = "CPA Monitor · 服务器状态报告"
-		text.WriteString("## " + title + "\n\n")
-		text.WriteString("> 服务器四项监控检查均已通过；账号状态与告警独立处理。\n\n")
-		writeMarkdownField(&text, "主机", report.Hostname)
-		writeMarkdownField(&text, "检查时间", report.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
-		writeMarkdownField(&text, "内存", fmt.Sprintf("已使用 %.1f%%（阈值 %.1f%%）", report.MemoryUsedPercent, report.MemoryThreshold))
-		writeMarkdownField(&text, "磁盘", fmt.Sprintf("%d 个挂载点，最高 %.1f%%（阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
-		writeMarkdownField(&text, "TCP", fmt.Sprintf("共 %d 个连接（阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
-		writeMarkdownField(&text, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
-		if report.AccountUsageAvailable {
-			writeMarkdownField(&text, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
-			writeAccountUsages(&text, report.AccountUsages, language, report.Timestamp)
-		} else {
-			writeMarkdownField(&text, "账号用量", "暂不可用（账号检查失败，不影响服务器状态报告）")
-		}
-		writeMarkdownField(&text, "CLIProxyAPI 地址", report.BaseURL)
-		writeMarkdownField(&text, "下次计划报告", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		title = "CPA Monitor · 运行正常"
+		writeCompactChineseHealth(&text, report, title)
 	} else {
 		text.WriteString("## " + title + "\n\n")
 		text.WriteString("> All four server checks passed; account status and alerts are handled independently.\n\n")
@@ -137,9 +128,42 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		}
 		writeMarkdownField(&text, "CLIProxyAPI base URL", report.BaseURL)
 		writeMarkdownField(&text, "Next scheduled report", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
+		writeVersionStatus(&text, report, language)
 	}
-	writeVersionStatus(&text, report, language)
 	return markdownPayload{MessageType: "markdown", Markdown: markdownContent{Title: truncateRunes(title, 100), Text: fitMarkdown(text.String(), language)}, At: at}, nil
+}
+
+func writeCompactChineseHealth(text *strings.Builder, report notification.HealthReport, title string) {
+	accounts := compactAccounts(report.AccountUsages)
+	attentionCount := compactAttentionCount(accounts)
+	text.WriteString("## " + title + "\n\n")
+	text.WriteString(fmt.Sprintf("> 服务器 4/4 正常 · 账号 %d/%d 启用\n", report.EnabledAccountCount, report.AccountCount))
+	switch {
+	case !report.AccountUsageAvailable:
+		text.WriteString("> 账号用量暂不可用，不影响服务器状态报告\n\n")
+	case len(accounts) == 0:
+		text.WriteString("> 当前没有已启用账号\n\n")
+	case attentionCount > 0:
+		text.WriteString(fmt.Sprintf("> 用量提醒：%d 个账号周用量达到 %.0f%%\n\n", attentionCount, quotaAttentionPercent))
+	default:
+		text.WriteString(fmt.Sprintf("> 账号周用量均低于 %.0f%%\n\n", quotaAttentionPercent))
+	}
+
+	text.WriteString("### 服务器概览\n\n")
+	text.WriteString("**" + escapeMarkdown(report.Hostname) + "**\n\n")
+	text.WriteString(fmt.Sprintf("**内存** %.1f%% / %.1f%%　　**磁盘** %.1f%% / %.1f%%\n\n",
+		report.MemoryUsedPercent, report.MemoryThreshold, report.HighestDiskUsedPercent, report.DiskThreshold))
+	text.WriteString(fmt.Sprintf("**TCP** %d / %d　　**端口 %d** %d / %d\n",
+		report.TotalTCPConnections, report.TotalTCPThreshold, report.ServicePort,
+		report.ServicePortConnections, report.ServicePortThreshold))
+
+	if report.AccountUsageAvailable {
+		writeCompactChineseAccounts(text, accounts, report.Timestamp)
+	}
+	writeCompactChineseVersion(text, report)
+	text.WriteString("\n" + markdownLink("管理面板", report.BaseURL) + "　　" + markdownLink("版本发布", report.ReleaseURL) + "\n\n")
+	text.WriteString(fmt.Sprintf("检查于 %s · 下次 %s（北京时间）\n",
+		formatBeijingDateTime(report.Timestamp), formatNextBeijingTime(report.Timestamp, report.NextScheduledAt)))
 }
 
 func validateHealthReport(report notification.HealthReport) error {
@@ -169,6 +193,197 @@ func validateHealthReport(report notification.HealthReport) error {
 	return nil
 }
 
+type compactAccount struct {
+	usage  notification.AccountUsage
+	window *notification.QuotaWindow
+	order  int
+}
+
+func compactAccounts(usages []notification.AccountUsage) []compactAccount {
+	accounts := make([]compactAccount, len(usages))
+	for i, usage := range usages {
+		accounts[i] = compactAccount{usage: usage, window: preferredQuotaWindow(usage.QuotaWindows), order: i}
+	}
+	sort.SliceStable(accounts, func(i, j int) bool {
+		left, leftOK := compactUsedPercent(accounts[i])
+		right, rightOK := compactUsedPercent(accounts[j])
+		switch {
+		case leftOK != rightOK:
+			return leftOK
+		case leftOK && left != right:
+			return left > right
+		default:
+			return accounts[i].order < accounts[j].order
+		}
+	})
+	return accounts
+}
+
+func preferredQuotaWindow(windows []notification.QuotaWindow) *notification.QuotaWindow {
+	priority := map[string]int{
+		"weekly": 0, "monthly": 1, "secondary": 2, "five_hour": 3, "primary": 4,
+	}
+	best, bestPriority := -1, len(priority)+1
+	for i := range windows {
+		value, ok := priority[windows[i].Kind]
+		if !ok {
+			value = len(priority)
+		}
+		if value < bestPriority {
+			best, bestPriority = i, value
+		}
+	}
+	if best < 0 {
+		return nil
+	}
+	return &windows[best]
+}
+
+func compactUsedPercent(account compactAccount) (float64, bool) {
+	if account.window == nil || account.window.UsedPercent == nil {
+		return 0, false
+	}
+	return *account.window.UsedPercent, true
+}
+
+func compactAttentionCount(accounts []compactAccount) int {
+	count := 0
+	for _, account := range accounts {
+		if used, ok := compactUsedPercent(account); ok && used >= quotaAttentionPercent {
+			count++
+		}
+	}
+	return count
+}
+
+func writeCompactChineseAccounts(text *strings.Builder, accounts []compactAccount, checkedAt time.Time) {
+	text.WriteString("\n### 账号周用量（高 → 低）\n\n")
+	if len(accounts) == 0 {
+		text.WriteString("暂无已启用账号\n")
+		return
+	}
+	for i, account := range accounts {
+		if i > 0 {
+			text.WriteString("\n")
+		}
+		status := "未知"
+		percentText := ""
+		if used, ok := compactUsedPercent(account); ok {
+			status = "正常"
+			if used >= quotaAttentionPercent {
+				status = "关注"
+			}
+			percentText = "　" + formatCompactPercent(used) + "%"
+		}
+		text.WriteString(fmt.Sprintf("**[%s] %s%s**\n\n", status, escapeMarkdown(account.usage.Label), percentText))
+		text.WriteString(compactQuotaLine(account, checkedAt) + "\n\n")
+		text.WriteString(compactRequestLine(account.usage) + "\n")
+	}
+}
+
+func compactQuotaLine(account compactAccount, checkedAt time.Time) string {
+	if account.window != nil && account.window.UsedPercent != nil {
+		used := *account.window.UsedPercent
+		line := quotaProgressBar(used) + "　剩余 " + formatCompactPercent(100-used) + "%"
+		if resetAt := quotaResetAt(*account.window, checkedAt); !resetAt.IsZero() {
+			line += " · " + formatBeijingDateTime(resetAt) + " 重置"
+		}
+		return line
+	}
+	if !account.usage.QuotaSupported {
+		return "套餐额度暂不支持"
+	}
+	if !account.usage.QuotaAvailable {
+		return "套餐额度暂不可用"
+	}
+	if account.window == nil {
+		return "套餐额度暂无数据"
+	}
+	line := quotaWindowLabel(account.window.Kind, "zh-CN") + "用量暂不可用"
+	if resetAt := quotaResetAt(*account.window, checkedAt); !resetAt.IsZero() {
+		line += " · " + formatBeijingDateTime(resetAt) + " 重置"
+	}
+	return line
+}
+
+func compactRequestLine(usage notification.AccountUsage) string {
+	recent := usage.RecentSuccess + usage.RecentFailed
+	if recent == 0 {
+		return "近期暂无请求"
+	}
+	successRate := float64(usage.RecentSuccess) / float64(recent) * 100
+	return fmt.Sprintf("近期请求 %d · 成功率 %s%%", recent, formatCompactPercent(successRate))
+}
+
+func quotaProgressBar(used float64) string {
+	filled := int(math.Round(used / 100 * compactQuotaProgressSteps))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > compactQuotaProgressSteps {
+		filled = compactQuotaProgressSteps
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", compactQuotaProgressSteps-filled)
+}
+
+func quotaResetAt(window notification.QuotaWindow, checkedAt time.Time) time.Time {
+	if !window.ResetAt.IsZero() {
+		return window.ResetAt
+	}
+	if window.ResetAfter > 0 {
+		return checkedAt.Add(window.ResetAfter)
+	}
+	return time.Time{}
+}
+
+func formatCompactPercent(value float64) string {
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", value), ".0")
+}
+
+func formatBeijingDateTime(value time.Time) string {
+	return value.In(beijingTime).Format("01-02 15:04")
+}
+
+func formatNextBeijingTime(checkedAt, next time.Time) string {
+	checked, scheduled := checkedAt.In(beijingTime), next.In(beijingTime)
+	checkedYear, checkedMonth, checkedDay := checked.Date()
+	nextYear, nextMonth, nextDay := scheduled.Date()
+	if checkedYear == nextYear && checkedMonth == nextMonth && checkedDay == nextDay {
+		return scheduled.Format("15:04")
+	}
+	return scheduled.Format("01-02 15:04")
+}
+
+func writeCompactChineseVersion(text *strings.Builder, report notification.HealthReport) {
+	text.WriteString("\n### CLIProxyAPI\n\n")
+	if !report.VersionCheckAvailable {
+		text.WriteString("版本检查暂不可用，不影响服务器状态报告\n")
+		return
+	}
+	current, latest := displayVersion(report.CurrentVersion), displayVersion(report.LatestVersion)
+	switch {
+	case !report.VersionComparable:
+		text.WriteString(fmt.Sprintf("当前 **%s** · 最新 **%s** · 请打开发布页面确认\n", escapeMarkdown(current), escapeMarkdown(latest)))
+	case report.UpdateAvailable:
+		text.WriteString(fmt.Sprintf("发现新版本：**%s → %s** · 请安排升级\n", escapeMarkdown(current), escapeMarkdown(latest)))
+	default:
+		text.WriteString(fmt.Sprintf("当前 **%s** · 已是最新版本\n", escapeMarkdown(current)))
+	}
+}
+
+func displayVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if value != "" && value[0] >= '0' && value[0] <= '9' {
+		return "v" + value
+	}
+	return value
+}
+
+func markdownLink(label, target string) string {
+	target = strings.NewReplacer("\\", "%5C", "(", "%28", ")", "%29", " ", "%20").Replace(strings.TrimSpace(target))
+	return "[" + escapeMarkdown(label) + "](" + target + ")"
+}
+
 func writeVersionStatus(text *strings.Builder, report notification.HealthReport, language string) {
 	if language == "zh-CN" {
 		text.WriteString("\n### CLIProxyAPI 版本\n\n")
@@ -179,7 +394,7 @@ func writeVersionStatus(text *strings.Builder, report notification.HealthReport,
 			case !report.VersionComparable:
 				writeMarkdownField(text, "更新状态", "无法比较版本，请打开发布页面确认")
 			case report.UpdateAvailable:
-				writeMarkdownField(text, "更新状态", "⚠️ 发现新版本，请安排升级")
+				writeMarkdownField(text, "更新状态", "发现新版本，请安排升级")
 			default:
 				writeMarkdownField(text, "更新状态", "已是最新版本")
 			}
@@ -200,7 +415,7 @@ func writeVersionStatus(text *strings.Builder, report notification.HealthReport,
 		case !report.VersionComparable:
 			writeMarkdownField(text, "Update status", "versions could not be compared; check the releases page")
 		case report.UpdateAvailable:
-			writeMarkdownField(text, "Update status", "⚠️ a newer version is available")
+			writeMarkdownField(text, "Update status", "a newer version is available")
 		default:
 			writeMarkdownField(text, "Update status", "up to date")
 		}

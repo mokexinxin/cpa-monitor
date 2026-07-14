@@ -85,6 +85,72 @@ func TestHealthPayload(t *testing.T) {
 	}
 }
 
+func TestChineseHealthPayloadIsCompactSortedAndEmojiFree(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 13, 53, 37, 0, time.UTC)
+	weekly := func(used float64, resetAt time.Time) []notification.QuotaWindow {
+		return []notification.QuotaWindow{{Kind: "weekly", UsedPercent: testPercent(used), ResetAt: resetAt}}
+	}
+	payload, err := healthPayload(notification.HealthReport{
+		Hostname: "easy-bird-2.localdomain", Timestamp: now, NextScheduledAt: now.Add(time.Hour), BaseURL: "https://ai.harrycloud.top",
+		MemoryUsedPercent: 9.6, MemoryThreshold: 80, DiskMountCount: 2, HighestDiskUsedPercent: 5.6, DiskThreshold: 80,
+		TotalTCPConnections: 156, TotalTCPThreshold: 3000, ServicePort: 443, ServicePortConnections: 27,
+		ServicePortThreshold: 800, AccountUsageAvailable: true, AccountCount: 5, EnabledAccountCount: 4,
+		VersionCheckAvailable: true, CurrentVersion: "7.2.74", LatestVersion: "v7.2.74", VersionComparable: true,
+		ReleaseURL: "https://github.com/router-for-me/CLIProxyAPI/releases",
+		AccountUsages: []notification.AccountUsage{
+			{Label: "arnie.ai@icloud.com", Provider: "codex", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: weekly(27, time.Date(2026, 7, 21, 6, 11, 0, 0, time.UTC)), RecentSuccess: 6068, RecentFailed: 54},
+			{Label: "logan.wu.ai@gmail.com", Provider: "codex", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: weekly(78, time.Date(2026, 7, 21, 5, 1, 0, 0, time.UTC)), RecentSuccess: 13},
+			{Label: "mokexinxin@icloud.com", Provider: "codex", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: weekly(5, time.Date(2026, 7, 20, 3, 32, 0, 0, time.UTC))},
+			{Label: "mokexinxin@gmail.com", Provider: "codex", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: weekly(75, time.Date(2026, 7, 20, 0, 57, 0, 0, time.UTC))},
+		},
+	}, "zh-CN", atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Markdown.Title != "CPA Monitor · 运行正常" {
+		t.Fatalf("title = %q", payload.Markdown.Title)
+	}
+	for _, want := range []string{
+		"服务器 4/4 正常 · 账号 4/5 启用",
+		"用量提醒：2 个账号周用量达到 75%",
+		"**内存** 9.6% / 80.0%　　**磁盘** 5.6% / 80.0%",
+		"**TCP** 156 / 3000　　**端口 443** 27 / 800",
+		"**[关注] logan.wu.ai@gmail.com　78%**",
+		"████████░░　剩余 22% · 07-21 13:01 重置",
+		"近期请求 13 · 成功率 100%",
+		"**[正常] arnie.ai@icloud.com　27%**",
+		"近期请求 6122 · 成功率 99.1%",
+		"当前 **v7.2.74** · 已是最新版本",
+		"[管理面板](https://ai.harrycloud.top)",
+		"[版本发布](https://github.com/router-for-me/CLIProxyAPI/releases)",
+		"检查于 07-14 21:53 · 下次 22:53（北京时间）",
+	} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Errorf("markdown missing %q:\n%s", want, payload.Markdown.Text)
+		}
+	}
+	positions := []int{
+		strings.Index(payload.Markdown.Text, "logan.wu.ai@gmail.com"),
+		strings.Index(payload.Markdown.Text, "mokexinxin@gmail.com"),
+		strings.Index(payload.Markdown.Text, "arnie.ai@icloud.com"),
+		strings.Index(payload.Markdown.Text, "mokexinxin@icloud.com"),
+	}
+	for i, position := range positions {
+		if position < 0 || (i > 0 && position <= positions[i-1]) {
+			t.Fatalf("accounts are not sorted by weekly usage: positions=%v\n%s", positions, payload.Markdown.Text)
+		}
+	}
+	if strings.ContainsAny(payload.Markdown.Text, "✅⚠️🟡🟢🖥👤🔄") {
+		t.Fatalf("compact report contains an emoji:\n%s", payload.Markdown.Text)
+	}
+	for _, old := range []string{"进程累计", "CLIProxyAPI 地址", "下次计划报告"} {
+		if strings.Contains(payload.Markdown.Text, old) {
+			t.Fatalf("compact report retained old verbose field %q:\n%s", old, payload.Markdown.Text)
+		}
+	}
+}
+
 func testPercent(value float64) *float64 { return &value }
 
 func TestAccountUsageTextKeepsRequestStatsWhenQuotaFails(t *testing.T) {
@@ -100,6 +166,22 @@ func TestAccountUsageTextKeepsRequestStatsWhenQuotaFails(t *testing.T) {
 	}
 }
 
+func TestCompactChineseAccountMarksUnavailableQuotaUnknown(t *testing.T) {
+	t.Parallel()
+	account := compactAccount{usage: notification.AccountUsage{
+		Label: "quota-unavailable@example.test", Provider: "codex", QuotaSupported: true,
+		RecentSuccess: 9, RecentFailed: 1,
+	}}
+	var text strings.Builder
+	writeCompactChineseAccounts(&text, []compactAccount{account}, time.Now())
+	if !strings.Contains(text.String(), "**[未知] quota-unavailable@example.test**") || !strings.Contains(text.String(), "套餐额度暂不可用") || !strings.Contains(text.String(), "成功率 90%") {
+		t.Fatalf("unexpected unavailable quota rendering:\n%s", text.String())
+	}
+	if strings.Contains(text.String(), "[正常]") {
+		t.Fatalf("unavailable quota was marked normal:\n%s", text.String())
+	}
+}
+
 func TestHealthPayloadReportsUnavailableAccountUsageWithoutFailingServerStatus(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)
@@ -112,7 +194,7 @@ func TestHealthPayloadReportsUnavailableAccountUsageWithoutFailingServerStatus(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"服务器状态报告", "服务器四项监控检查均已通过", "账号用量", "暂不可用", "不影响服务器状态报告", "CLIProxyAPI 版本", "版本检查失败", "github.com/router-for-me/CLIProxyAPI/releases"} {
+	for _, want := range []string{"运行正常", "服务器 4/4 正常", "账号用量暂不可用", "不影响服务器状态报告", "CLIProxyAPI", "版本检查暂不可用", "github.com/router-for-me/CLIProxyAPI/releases", "北京时间"} {
 		if !strings.Contains(payload.Markdown.Text, want) {
 			t.Fatalf("markdown missing %q:\n%s", want, payload.Markdown.Text)
 		}
