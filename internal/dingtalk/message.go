@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -113,7 +114,7 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		writeMarkdownField(&text, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
 		if report.AccountUsageAvailable {
 			writeMarkdownField(&text, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
-			writeAccountUsages(&text, report.AccountUsages, language)
+			writeAccountUsages(&text, report.AccountUsages, language, report.Timestamp)
 		} else {
 			writeMarkdownField(&text, "账号用量", "暂不可用（账号检查失败，不影响服务器状态报告）")
 		}
@@ -130,7 +131,7 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		writeMarkdownField(&text, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (threshold %d)", report.ServicePortConnections, report.ServicePortThreshold))
 		if report.AccountUsageAvailable {
 			writeMarkdownField(&text, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
-			writeAccountUsages(&text, report.AccountUsages, language)
+			writeAccountUsages(&text, report.AccountUsages, language, report.Timestamp)
 		} else {
 			writeMarkdownField(&text, "Account usage", "temporarily unavailable (account check failed; server status reporting is unaffected)")
 		}
@@ -157,14 +158,14 @@ func validateHealthReport(report notification.HealthReport) error {
 		return errors.New("DingTalk unavailable account usage must not contain counters")
 	}
 	for _, usage := range report.AccountUsages {
-		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {
+		if notification.ValidateAccountUsage(usage) != nil {
 			return errors.New("DingTalk health report account usage is invalid")
 		}
 	}
 	return nil
 }
 
-func writeAccountUsages(text *strings.Builder, usages []notification.AccountUsage, language string) {
+func writeAccountUsages(text *strings.Builder, usages []notification.AccountUsage, language string, checkedAt time.Time) {
 	if len(usages) == 0 {
 		return
 	}
@@ -178,13 +179,86 @@ func writeAccountUsages(text *strings.Builder, usages []notification.AccountUsag
 		if provider := strings.TrimSpace(usage.Provider); provider != "" {
 			label += " (" + provider + ")"
 		}
-		total, recent := usage.Success+usage.Failed, usage.RecentSuccess+usage.RecentFailed
-		if language == "zh-CN" {
-			writeMarkdownField(text, label, fmt.Sprintf("进程累计 %d 次（成功 %d / 失败 %d）；近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+		writeMarkdownField(text, label, accountUsageText(usage, language, checkedAt))
+	}
+}
+
+func accountUsageText(usage notification.AccountUsage, language string, checkedAt time.Time) string {
+	lines := make([]string, 0, len(usage.QuotaWindows)+2)
+	if usage.QuotaSupported {
+		if usage.QuotaAvailable {
+			if plan := strings.TrimSpace(usage.PlanType); plan != "" {
+				if language == "zh-CN" {
+					lines = append(lines, "套餐："+plan)
+				} else {
+					lines = append(lines, "Plan: "+plan)
+				}
+			}
+			for _, window := range usage.QuotaWindows {
+				lines = append(lines, quotaWindowText(window, language, checkedAt))
+			}
+		} else if language == "zh-CN" {
+			lines = append(lines, "套餐额度：获取失败（不影响服务器状态报告）")
 		} else {
-			writeMarkdownField(text, label, fmt.Sprintf("process total %d (success %d / failed %d); recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+			lines = append(lines, "Plan quota: unavailable (server status reporting is unaffected)")
 		}
 	}
+	total, recent := usage.Success+usage.Failed, usage.RecentSuccess+usage.RecentFailed
+	if language == "zh-CN" {
+		lines = append(lines, fmt.Sprintf("请求统计：进程累计 %d 次（成功 %d / 失败 %d）；近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+	} else {
+		lines = append(lines, fmt.Sprintf("Request stats: process total %d (success %d / failed %d); recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func quotaWindowText(window notification.QuotaWindow, language string, checkedAt time.Time) string {
+	label := quotaWindowLabel(window.Kind, language)
+	usageText := "用量未知"
+	if language != "zh-CN" {
+		usageText = "usage unavailable"
+	}
+	if window.UsedPercent != nil {
+		remaining := 100 - *window.UsedPercent
+		if language == "zh-CN" {
+			usageText = fmt.Sprintf("已用 %.1f%%，剩余 %.1f%%", *window.UsedPercent, remaining)
+		} else {
+			usageText = fmt.Sprintf("%.1f%% used, %.1f%% remaining", *window.UsedPercent, remaining)
+		}
+	}
+	resetAt := window.ResetAt
+	if resetAt.IsZero() && window.ResetAfter > 0 {
+		resetAt = checkedAt.Add(window.ResetAfter)
+	}
+	if !resetAt.IsZero() {
+		if language == "zh-CN" {
+			usageText += "，重置 " + resetAt.UTC().Format("2006-01-02 15:04 UTC")
+		} else {
+			usageText += ", resets " + resetAt.UTC().Format("2006-01-02 15:04 UTC")
+		}
+	}
+	if language == "zh-CN" {
+		return label + "：" + usageText
+	}
+	return label + ": " + usageText
+}
+
+func quotaWindowLabel(kind, language string) string {
+	labels := map[string][2]string{
+		"five_hour": {"5 小时限额", "5-hour limit"},
+		"weekly":    {"周限额", "Weekly limit"},
+		"monthly":   {"月度限额", "Monthly limit"},
+		"primary":   {"短周期限额", "Primary limit"},
+		"secondary": {"长周期限额", "Secondary limit"},
+	}
+	label, ok := labels[kind]
+	if !ok {
+		label = [2]string{"套餐限额", "Plan limit"}
+	}
+	if language == "zh-CN" {
+		return label[0]
+	}
+	return label[1]
 }
 
 func validateLanguage(language string) error {

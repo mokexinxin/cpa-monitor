@@ -105,7 +105,7 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（告警阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
 		if report.AccountUsageAvailable {
 			writeBodyField(&plain, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
-			writePlainAccountUsages(&plain, report.AccountUsages, language)
+			writePlainAccountUsages(&plain, report.AccountUsages, language, report.Timestamp)
 		} else {
 			writeBodyField(&plain, "账号用量", "暂不可用（账号检查失败，不影响服务器状态报告）")
 		}
@@ -123,7 +123,7 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (alert at %d)", report.ServicePortConnections, report.ServicePortThreshold))
 		if report.AccountUsageAvailable {
 			writeBodyField(&plain, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
-			writePlainAccountUsages(&plain, report.AccountUsages, language)
+			writePlainAccountUsages(&plain, report.AccountUsages, language, report.Timestamp)
 		} else {
 			writeBodyField(&plain, "Account usage", "temporarily unavailable (account check failed; server status reporting is unaffected)")
 		}
@@ -139,13 +139,13 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
 }
 
-func writePlainAccountUsages(plain *strings.Builder, usages []notification.AccountUsage, language string) {
+func writePlainAccountUsages(plain *strings.Builder, usages []notification.AccountUsage, language string, checkedAt time.Time) {
 	for _, usage := range usages {
 		label := accountUsageLabel(usage)
 		if language == LanguageChinese {
-			writeBodyField(plain, "账号用量 "+label, accountUsageText(usage, language))
+			writeBodyField(plain, "账号用量 "+label, accountUsageText(usage, language, checkedAt))
 		} else {
-			writeBodyField(plain, "Account usage "+label, accountUsageText(usage, language))
+			writeBodyField(plain, "Account usage "+label, accountUsageText(usage, language, checkedAt))
 		}
 	}
 }
@@ -262,7 +262,7 @@ func renderHealthHTML(report HealthReport, language string) string {
 	portCard := metricCard(portLabel, fmt.Sprintf("%d", report.ServicePortConnections), portNote)
 	accountUsageSection := ""
 	if report.AccountUsageAvailable {
-		accountUsageSection = renderAccountUsageHTML(report.AccountUsages, language)
+		accountUsageSection = renderAccountUsageHTML(report.AccountUsages, language, report.Timestamp)
 	}
 	return emailShell(preheader, fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0"><tr>
@@ -275,7 +275,7 @@ func renderHealthHTML(report HealthReport, language string) string {
 <div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), accountUsageSection, html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339))), language)
 }
 
-func renderAccountUsageHTML(usages []notification.AccountUsage, language string) string {
+func renderAccountUsageHTML(usages []notification.AccountUsage, language string, checkedAt time.Time) string {
 	if len(usages) == 0 {
 		return ""
 	}
@@ -285,7 +285,7 @@ func renderAccountUsageHTML(usages []notification.AccountUsage, language string)
 	}
 	rows := make([][2]string, 0, len(usages))
 	for _, usage := range usages {
-		rows = append(rows, [2]string{accountUsageLabel(usage), accountUsageText(usage, language)})
+		rows = append(rows, [2]string{accountUsageLabel(usage), accountUsageText(usage, language, checkedAt)})
 	}
 	return `<div style="margin-top:20px"><div style="margin-bottom:8px;font-size:15px;font-weight:700;color:#172033">` + html.EscapeString(heading) + `</div>` + detailTable(rows) + `</div>`
 }
@@ -298,12 +298,82 @@ func accountUsageLabel(usage notification.AccountUsage) string {
 	return label
 }
 
-func accountUsageText(usage notification.AccountUsage, language string) string {
+func accountUsageText(usage notification.AccountUsage, language string, checkedAt time.Time) string {
+	parts := make([]string, 0, len(usage.QuotaWindows)+2)
+	if usage.QuotaSupported {
+		if usage.QuotaAvailable {
+			if plan := strings.TrimSpace(usage.PlanType); plan != "" {
+				if language == LanguageChinese {
+					parts = append(parts, "套餐 "+plan)
+				} else {
+					parts = append(parts, "plan "+plan)
+				}
+			}
+			for _, window := range usage.QuotaWindows {
+				parts = append(parts, quotaWindowText(window, language, checkedAt))
+			}
+		} else if language == LanguageChinese {
+			parts = append(parts, "套餐额度获取失败（不影响服务器状态报告）")
+		} else {
+			parts = append(parts, "plan quota unavailable (server status reporting is unaffected)")
+		}
+	}
 	total, recent := usage.Success+usage.Failed, usage.RecentSuccess+usage.RecentFailed
 	if language == LanguageChinese {
-		return fmt.Sprintf("进程累计 %d 次（成功 %d / 失败 %d）；近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed)
+		parts = append(parts, fmt.Sprintf("请求统计：进程累计 %d 次（成功 %d / 失败 %d），近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+		return strings.Join(parts, "；")
 	}
-	return fmt.Sprintf("process total %d (success %d / failed %d); recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed)
+	parts = append(parts, fmt.Sprintf("request stats: process total %d (success %d / failed %d), recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+	return strings.Join(parts, "; ")
+}
+
+func quotaWindowText(window notification.QuotaWindow, language string, checkedAt time.Time) string {
+	label := quotaWindowLabel(window.Kind, language)
+	usageText := "用量未知"
+	if language != LanguageChinese {
+		usageText = "usage unavailable"
+	}
+	if window.UsedPercent != nil {
+		remaining := 100 - *window.UsedPercent
+		if language == LanguageChinese {
+			usageText = fmt.Sprintf("已用 %.1f%%，剩余 %.1f%%", *window.UsedPercent, remaining)
+		} else {
+			usageText = fmt.Sprintf("%.1f%% used, %.1f%% remaining", *window.UsedPercent, remaining)
+		}
+	}
+	resetAt := window.ResetAt
+	if resetAt.IsZero() && window.ResetAfter > 0 {
+		resetAt = checkedAt.Add(window.ResetAfter)
+	}
+	if !resetAt.IsZero() {
+		if language == LanguageChinese {
+			usageText += "，重置 " + resetAt.UTC().Format("2006-01-02 15:04 UTC")
+		} else {
+			usageText += ", resets " + resetAt.UTC().Format("2006-01-02 15:04 UTC")
+		}
+	}
+	if language == LanguageChinese {
+		return label + "：" + usageText
+	}
+	return label + ": " + usageText
+}
+
+func quotaWindowLabel(kind, language string) string {
+	labels := map[string][2]string{
+		"five_hour": {"5 小时限额", "5-hour limit"},
+		"weekly":    {"周限额", "weekly limit"},
+		"monthly":   {"月度限额", "monthly limit"},
+		"primary":   {"短周期限额", "primary limit"},
+		"secondary": {"长周期限额", "secondary limit"},
+	}
+	label, ok := labels[kind]
+	if !ok {
+		label = [2]string{"套餐限额", "plan limit"}
+	}
+	if language == LanguageChinese {
+		return label[0]
+	}
+	return label[1]
 }
 
 func emailShell(preheader, content, language string) string {
@@ -375,7 +445,7 @@ func validateHealthReport(report HealthReport) error {
 		return fmt.Errorf("unavailable account usage must not contain counters")
 	}
 	for _, usage := range report.AccountUsages {
-		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {
+		if notification.ValidateAccountUsage(usage) != nil {
 			return fmt.Errorf("health report account usage is invalid")
 		}
 	}

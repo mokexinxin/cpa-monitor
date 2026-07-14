@@ -7,15 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/mokexinxin/cpa-monitor/internal/cliproxy"
 	"github.com/mokexinxin/cpa-monitor/internal/monitor"
 	"github.com/mokexinxin/cpa-monitor/internal/notification"
 	"github.com/mokexinxin/cpa-monitor/internal/state"
 )
 
 type Sender = notification.HealthSender
+
+// QuotaFetcher retrieves provider plan limits only when a scheduled report is
+// due, avoiding one upstream quota request per monitor cycle.
+type QuotaFetcher interface {
+	CodexQuota(context.Context, string, string) (cliproxy.CodexQuota, error)
+}
 
 type Store interface {
 	HealthReport() state.HealthReportState
@@ -30,6 +38,7 @@ type Options struct {
 	Hostname      string
 	BaseURL       string
 	Logger        *slog.Logger
+	QuotaFetcher  QuotaFetcher
 }
 
 type Manager struct {
@@ -42,6 +51,7 @@ type Manager struct {
 	hostname      string
 	baseURL       string
 	logger        *slog.Logger
+	quotaFetcher  QuotaFetcher
 	now           func() time.Time
 }
 
@@ -77,6 +87,7 @@ func New(sender Sender, store Store, options Options) (*Manager, error) {
 		hostname:      options.Hostname,
 		baseURL:       options.BaseURL,
 		logger:        logger,
+		quotaFetcher:  options.QuotaFetcher,
 		now:           time.Now,
 	}, nil
 }
@@ -125,6 +136,7 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 			RecentSuccess: usage.RecentSuccess,
 			RecentFailed:  usage.RecentFailed,
 		}
+		m.addQuota(ctx, usage, &report.AccountUsages[i])
 	}
 	sendErr := m.sender.SendHealth(ctx, report)
 	current.LastAttemptAt = now
@@ -141,6 +153,47 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		m.logger.InfoContext(ctx, "healthy report sent", "next_scheduled_at", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	}
 	return sendErr
+}
+
+func (m *Manager) addQuota(ctx context.Context, source monitor.AccountUsage, target *notification.AccountUsage) {
+	if target == nil || !strings.EqualFold(strings.TrimSpace(source.Provider), "codex") {
+		return
+	}
+	target.QuotaSupported = true
+	if m.quotaFetcher == nil {
+		m.logger.WarnContext(ctx, "account quota unavailable", "provider", "codex", "account", source.Label, "reason", "quota fetcher is not configured")
+		return
+	}
+	quota, err := m.quotaFetcher.CodexQuota(ctx, source.AuthIndex, source.AccountID)
+	if err != nil {
+		m.logger.WarnContext(ctx, "account quota unavailable", "provider", "codex", "account", source.Label, "error", err)
+		return
+	}
+	candidate := *target
+	candidate.PlanType = quota.PlanType
+	candidate.QuotaAvailable = true
+	candidate.QuotaWindows = make([]notification.QuotaWindow, len(quota.Windows))
+	for i, window := range quota.Windows {
+		candidate.QuotaWindows[i] = notification.QuotaWindow{
+			Kind:        string(window.Kind),
+			UsedPercent: cloneFloat64(window.UsedPercent),
+			ResetAt:     window.ResetAt,
+			ResetAfter:  window.ResetAfter,
+		}
+	}
+	if err := notification.ValidateAccountUsage(candidate); err != nil {
+		m.logger.WarnContext(ctx, "account quota unavailable", "provider", "codex", "account", source.Label, "error", err)
+		return
+	}
+	*target = candidate
+}
+
+func cloneFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func due(current state.HealthReportState, now time.Time, interval, retryInterval time.Duration) bool {

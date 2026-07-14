@@ -3,6 +3,7 @@ package monitor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"reflect"
@@ -139,7 +140,7 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 	reporter := &recordingHealthReporter{}
 	runner := newTestRunner(t, Options{
 		API: &fakeAPI{files: []cliproxy.AuthFile{
-			{AuthIndex: "a", Email: "a@example.test", Provider: "codex", Success: 12, Failed: 3, RecentRequests: []cliproxy.RecentRequest{{Success: 2}, {Success: 1, Failed: 1}}},
+			{AuthIndex: "a", Email: "a@example.test", Provider: "codex", IDToken: json.RawMessage(`{"chatgpt_account_id":"account-a"}`), Success: 12, Failed: 3, RecentRequests: []cliproxy.RecentRequest{{Success: 2}, {Success: 1, Failed: 1}}},
 			{AuthIndex: "b", Email: "disabled@example.test", Disabled: true, Success: 99},
 			{AuthIndex: "c", Account: "team-c", Provider: "claude", Success: 4, RecentRequests: []cliproxy.RecentRequest{{Failed: 2}}},
 		}},
@@ -163,8 +164,8 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 		t.Fatalf("snapshot = %#v", got)
 	}
 	wantUsages := []AccountUsage{
-		{Label: "a@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
-		{Label: "team-c", Provider: "claude", Success: 4, RecentFailed: 2},
+		{AuthIndex: "a", AccountID: "account-a", Label: "a@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
+		{AuthIndex: "c", Label: "team-c", Provider: "claude", Success: 4, RecentFailed: 2},
 	}
 	if !reflect.DeepEqual(got.AccountUsages, wantUsages) {
 		t.Fatalf("account usages = %#v, want %#v", got.AccountUsages, wantUsages)

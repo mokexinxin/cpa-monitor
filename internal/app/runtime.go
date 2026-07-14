@@ -101,6 +101,7 @@ func buildRuntime(cfg config.Config, console io.Writer) (*Runtime, error) {
 		Hostname:      hostname,
 		BaseURL:       cfg.CLIProxy.BaseURL,
 		Logger:        logger,
+		QuotaFetcher:  api,
 	})
 	if err != nil {
 		return closeOnError(fmt.Errorf("initialize healthy report manager: %w", err))

@@ -50,10 +50,12 @@ type HealthSnapshot struct {
 	AccountUsages          []AccountUsage
 }
 
-// AccountUsage contains the request counters exposed by CLIProxyAPI for one
-// enabled account. Success and Failed are process-lifetime counters; the
-// recent values are summed from the rolling recent_requests window.
+// AccountUsage identifies one enabled account and contains the request
+// counters exposed by CLIProxyAPI. The identity fields let the health-report
+// manager fetch plan quota only when a report is actually due.
 type AccountUsage struct {
+	AuthIndex     string
+	AccountID     string
 	Label         string
 	Provider      string
 	Success       int64
@@ -325,8 +327,10 @@ func enabledAccountUsages(files []cliproxy.AuthFile) []AccountUsage {
 			recentFailed += bucket.Failed
 		}
 		usages = append(usages, AccountUsage{
+			AuthIndex:     file.AuthIndex,
+			AccountID:     file.ChatGPTAccountID(),
 			Label:         accountLabel(file, i+1),
-			Provider:      strings.TrimSpace(file.Provider),
+			Provider:      accountProvider(file),
 			Success:       file.Success,
 			Failed:        file.Failed,
 			RecentSuccess: recentSuccess,
@@ -334,6 +338,13 @@ func enabledAccountUsages(files []cliproxy.AuthFile) []AccountUsage {
 		})
 	}
 	return usages
+}
+
+func accountProvider(file cliproxy.AuthFile) string {
+	if provider := strings.TrimSpace(file.Provider); provider != "" {
+		return provider
+	}
+	return strings.TrimSpace(file.Type)
 }
 
 func accountLabel(file cliproxy.AuthFile, position int) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -65,12 +66,55 @@ type HealthReport struct {
 // AccountUsage is the transport-neutral request-usage summary for one enabled
 // CLIProxyAPI account.
 type AccountUsage struct {
-	Label         string
-	Provider      string
-	Success       int64
-	Failed        int64
-	RecentSuccess int64
-	RecentFailed  int64
+	Label          string
+	Provider       string
+	PlanType       string
+	QuotaSupported bool
+	QuotaAvailable bool
+	QuotaWindows   []QuotaWindow
+	Success        int64
+	Failed         int64
+	RecentSuccess  int64
+	RecentFailed   int64
+}
+
+// QuotaWindow is a provider plan-limit window displayed in an account usage
+// section. UsedPercent may be absent when the provider only reports reset
+// state.
+type QuotaWindow struct {
+	Kind        string
+	UsedPercent *float64
+	ResetAt     time.Time
+	ResetAfter  time.Duration
+}
+
+// ValidateAccountUsage checks the shared account and quota invariants before
+// a transport renders untrusted management/provider data.
+func ValidateAccountUsage(usage AccountUsage) error {
+	if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {
+		return errors.New("account usage identity and counters are invalid")
+	}
+	if !usage.QuotaSupported && (usage.QuotaAvailable || strings.TrimSpace(usage.PlanType) != "" || len(usage.QuotaWindows) != 0) {
+		return errors.New("unsupported account quota contains provider data")
+	}
+	if usage.QuotaAvailable && (!usage.QuotaSupported || len(usage.QuotaWindows) == 0) {
+		return errors.New("available account quota requires at least one window")
+	}
+	if !usage.QuotaAvailable && len(usage.QuotaWindows) != 0 {
+		return errors.New("unavailable account quota contains windows")
+	}
+	for _, window := range usage.QuotaWindows {
+		if strings.TrimSpace(window.Kind) == "" || window.ResetAfter < 0 {
+			return errors.New("account quota window kind or reset duration is invalid")
+		}
+		if window.UsedPercent != nil {
+			value := *window.UsedPercent
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 100 {
+				return errors.New("account quota used percent must be between 0 and 100")
+			}
+		}
+	}
+	return nil
 }
 
 // AlertSender sends one already-aggregated alert or recovery batch.

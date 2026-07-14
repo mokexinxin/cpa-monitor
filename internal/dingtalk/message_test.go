@@ -68,15 +68,33 @@ func TestHealthPayload(t *testing.T) {
 		TotalTCPConnections: 3, TotalTCPThreshold: 3000, ServicePort: 8317, ServicePortConnections: 2,
 		ServicePortThreshold: 800, AccountUsageAvailable: true, AccountCount: 4, EnabledAccountCount: 2,
 		AccountUsages: []notification.AccountUsage{
-			{Label: "one@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 2, RecentFailed: 1},
+			{Label: "one@example.test", Provider: "codex", PlanType: "plus", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: []notification.QuotaWindow{
+				{Kind: "five_hour", UsedPercent: testPercent(12.5), ResetAfter: 10 * time.Minute},
+				{Kind: "weekly", UsedPercent: testPercent(47.25), ResetAt: time.Unix(1784000000, 0).UTC()},
+			}, Success: 12, Failed: 3, RecentSuccess: 2, RecentFailed: 1},
 			{Label: "team-two", Provider: "claude", Success: 4},
 		},
 	}, "en", atContent{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Markdown.Title != "CPA Monitor · Server Status" || !strings.Contains(payload.Markdown.Text, "All four server checks passed") || !strings.Contains(payload.Markdown.Text, "2 enabled / 4 checked") || !strings.Contains(payload.Markdown.Text, "one@example.test (codex)") || !strings.Contains(payload.Markdown.Text, "process total 15 (success 12 / failed 3); recent 3 (success 2 / failed 1)") {
+	if payload.Markdown.Title != "CPA Monitor · Server Status" || !strings.Contains(payload.Markdown.Text, "All four server checks passed") || !strings.Contains(payload.Markdown.Text, "2 enabled / 4 checked") || !strings.Contains(payload.Markdown.Text, "one@example.test (codex)") || !strings.Contains(payload.Markdown.Text, "5-hour limit: 12.5% used, 87.5% remaining") || !strings.Contains(payload.Markdown.Text, "Weekly limit: 47.2% used, 52.8% remaining") || !strings.Contains(payload.Markdown.Text, "process total 15 (success 12 / failed 3); recent 3 (success 2 / failed 1)") {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func testPercent(value float64) *float64 { return &value }
+
+func TestAccountUsageTextKeepsRequestStatsWhenQuotaFails(t *testing.T) {
+	t.Parallel()
+	text := accountUsageText(notification.AccountUsage{
+		Label: "one@example.test", Provider: "codex", QuotaSupported: true,
+		Success: 3, Failed: 1,
+	}, "zh-CN", time.Now())
+	for _, want := range []string{"套餐额度：获取失败", "不影响服务器状态报告", "请求统计：进程累计 4 次"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("account usage text missing %q: %s", want, text)
+		}
 	}
 }
 

@@ -129,13 +129,13 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	}
 	parts := readAlternative(t, msg)
 	plain := string(parts["text/plain"])
-	for _, want := range []string{"状态: 健康 - 服务器四项检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 进程累计 15 次（成功 12 / 失败 3）；近期 4 次（成功 3 / 失败 1）"} {
+	for _, want := range []string{"状态: 健康 - 服务器四项检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 套餐 plus；5 小时限额：已用 12.5%", "周限额：已用 47.2%，剩余 52.8%", "请求统计：进程累计 15 次（成功 12 / 失败 3）"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain body does not contain %q:\n%s", want, plain)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"健康", "服务器系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "进程累计 15 次", "下次计划报告"} {
+	for _, want := range []string{"健康", "服务器系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "5 小时限额", "周限额", "进程累计 15 次", "下次计划报告"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -171,6 +171,30 @@ func TestBuildHealthMessageAllowsUnavailableAccountUsage(t *testing.T) {
 	for contentType, body := range parts {
 		if !strings.Contains(string(body), "账号用量") || !strings.Contains(string(body), "暂不可用") {
 			t.Fatalf("%s body did not explain unavailable account usage", contentType)
+		}
+	}
+}
+
+func TestBuildHealthMessageKeepsServerReportWhenCodexQuotaFails(t *testing.T) {
+	t.Parallel()
+	report := validHealthReport()
+	report.AccountUsages[0].PlanType = ""
+	report.AccountUsages[0].QuotaAvailable = false
+	report.AccountUsages[0].QuotaWindows = nil
+
+	raw, err := BuildHealthMessage("monitor@example.com", []string{"admin@example.com"}, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := readAlternative(t, msg)
+	for contentType, body := range parts {
+		text := string(body)
+		if !strings.Contains(text, "套餐额度获取失败") || !strings.Contains(text, "请求统计") {
+			t.Fatalf("%s body did not preserve account diagnostics after quota failure", contentType)
 		}
 	}
 }
@@ -231,7 +255,7 @@ func TestBuildMessagesInEnglish(t *testing.T) {
 	if !strings.Contains(string(parts["text/plain"]), "Status: HEALTHY - all four server checks passed") || !strings.Contains(string(parts["text/html"]), "Server systems are operating normally") {
 		t.Fatal("English health message was not localized")
 	}
-	if !strings.Contains(string(parts["text/plain"]), "Account usage one@example.test (codex): process total 15 (success 12 / failed 3); recent 4 (success 3 / failed 1)") || !strings.Contains(string(parts["text/html"]), "Enabled account usage") {
+	if !strings.Contains(string(parts["text/plain"]), "Account usage one@example.test (codex): plan plus; 5-hour limit: 12.5% used, 87.5% remaining") || !strings.Contains(string(parts["text/plain"]), "weekly limit: 47.2% used, 52.8% remaining") || !strings.Contains(string(parts["text/html"]), "Enabled account usage") {
 		t.Fatal("English account usage was not rendered")
 	}
 	if !strings.Contains(string(parts["text/html"]), `<html lang="en">`) {
@@ -348,11 +372,16 @@ func validHealthReport() HealthReport {
 		AccountCount:           3,
 		EnabledAccountCount:    2,
 		AccountUsages: []notification.AccountUsage{
-			{Label: "one@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
+			{Label: "one@example.test", Provider: "codex", PlanType: "plus", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: []notification.QuotaWindow{
+				{Kind: "five_hour", UsedPercent: testQuotaPercent(12.5), ResetAfter: 10 * time.Minute},
+				{Kind: "weekly", UsedPercent: testQuotaPercent(47.25), ResetAt: time.Unix(1784000000, 0).UTC()},
+			}, Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
 			{Label: "team-two", Provider: "claude", Success: 4, RecentFailed: 1},
 		},
 	}
 }
+
+func testQuotaPercent(value float64) *float64 { return &value }
 
 func readAlternative(t *testing.T, msg *mail.Message) map[string][]byte {
 	t.Helper()

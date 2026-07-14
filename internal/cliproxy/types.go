@@ -2,8 +2,10 @@ package cliproxy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // RecentRequest is one request-count bucket reported by the management API.
@@ -29,6 +31,7 @@ type AuthFile struct {
 	Success        int64           `json:"success"`
 	Failed         int64           `json:"failed"`
 	RecentRequests []RecentRequest `json:"recent_requests"`
+	IDToken        json.RawMessage `json:"id_token"`
 }
 
 // UnmarshalJSON accepts auth_index as either a string or an integer JSON
@@ -49,6 +52,7 @@ func (a *AuthFile) UnmarshalJSON(data []byte) error {
 		Success        int64           `json:"success"`
 		Failed         int64           `json:"failed"`
 		RecentRequests []RecentRequest `json:"recent_requests"`
+		IDToken        json.RawMessage `json:"id_token"`
 	}
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
@@ -72,6 +76,54 @@ func (a *AuthFile) UnmarshalJSON(data []byte) error {
 		Success:        wire.Success,
 		Failed:         wire.Failed,
 		RecentRequests: wire.RecentRequests,
+		IDToken:        append(json.RawMessage(nil), wire.IDToken...),
+	}
+	return nil
+}
+
+// ChatGPTAccountID returns the Codex account identifier exposed by current
+// CLIProxyAPI auth-files responses. It also accepts the older raw-JWT form so
+// quota lookups continue to work across CLIProxyAPI upgrades.
+func (a AuthFile) ChatGPTAccountID() string {
+	raw := bytes.TrimSpace(a.IDToken)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var token string
+		if json.Unmarshal(raw, &token) != nil {
+			return ""
+		}
+		parts := strings.Split(token, ".")
+		if len(parts) < 2 {
+			return ""
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return ""
+		}
+		raw = payload
+	}
+
+	var claims map[string]any
+	if json.Unmarshal(raw, &claims) != nil {
+		return ""
+	}
+	for _, source := range []map[string]any{claims, nestedStringMap(claims["https://api.openai.com/auth"])} {
+		for _, key := range []string{"chatgpt_account_id", "chatgptAccountId"} {
+			if value, ok := source[key].(string); ok {
+				if value = strings.TrimSpace(value); value != "" {
+					return value
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func nestedStringMap(value any) map[string]any {
+	if result, ok := value.(map[string]any); ok {
+		return result
 	}
 	return nil
 }

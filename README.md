@@ -10,7 +10,9 @@ It checks:
 - Linux memory usage from `/proc/meminfo`;
 - real mount usage from `/proc/self/mountinfo` plus `statfs`;
 - all TCP entries in `/proc/net/tcp` and `/proc/net/tcp6`;
-- account availability from `GET /v0/management/auth-files`.
+- account availability from `GET /v0/management/auth-files`;
+- Codex 5-hour and weekly plan usage through the protected management
+  `POST /v0/management/api-call` endpoint.
 
 Alerts can be sent through a signed DingTalk custom group robot, SMTP, or a
 primary/fallback combination. The same key is suppressed until it recovers.
@@ -291,13 +293,20 @@ does not send a duplicate message.
 
 The SMTP HTML report uses an email-client-safe responsive card layout, high-contrast
 status labels, and escaped dynamic content. A plain-text alternative is always
-included. DingTalk and SMTP server-status reports also list request usage for every
-enabled account: the CLIProxyAPI process-lifetime success/failure counters and
-the totals from its rolling `recent_requests` window. Disabled accounts are not
-expanded in the usage list, while the report still shows both enabled and total
-checked account counts. These counters describe requests handled by CLIProxyAPI;
-they are not provider subscription-quota percentages. When account usage cannot
-be fetched, the server report marks it unavailable and is still delivered.
+included. For every enabled Codex account, DingTalk and SMTP server-status
+reports query the same protected usage endpoint used by CLIProxyAPI's management
+center and display the plan, 5-hour limit, weekly (or monthly) limit, percentage
+used and remaining, and reset time. Quota queries run only when a report is due,
+not on every monitor cycle. The CLIProxyAPI process-lifetime and rolling
+`recent_requests` success/failure counters remain as request diagnostics below
+the plan quota. Disabled accounts are not expanded in the usage list, while the
+report still shows both enabled and total checked account counts. Other account
+providers currently keep the request diagnostics without provider-plan quota.
+If one Codex quota query fails, that account is marked unavailable and the
+server report plus every other account's quota are still delivered. If the
+auth-files check itself fails, the server report marks all account usage
+unavailable and is still delivered. Codex plan usage requires a CLIProxyAPI
+version that exposes `POST /v0/management/api-call`.
 Account alerts and recoveries are sent as separate messages per account, apart
 from the periodic server report. Alert and recovery emails use the same
 multipart HTML/text format.

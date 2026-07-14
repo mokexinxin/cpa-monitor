@@ -2,6 +2,8 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -156,6 +158,7 @@ func TestAuthFilesSendsBearerAndDecodesWireContract(t *testing.T) {
 					"success": 12,
 					"failed": 3,
 					"recent_requests": [{"time":"2026-07-10T00:00:00Z","success":2,"failed":1}],
+					"id_token": {"chatgpt_account_id":"account-one","plan_type":"plus"},
 					"future_field": {"is": "ignored"}
 				},
 				{"auth_index": 123456789012345678901234567890, "name": "two.json"}
@@ -195,8 +198,97 @@ func TestAuthFilesSendsBearerAndDecodesWireContract(t *testing.T) {
 	if got := files[0].RecentRequests; len(got) != 1 || got[0].Time != "2026-07-10T00:00:00Z" || got[0].Success != 2 || got[0].Failed != 1 {
 		t.Fatalf("RecentRequests = %#v, want decoded bucket", got)
 	}
+	if got := files[0].ChatGPTAccountID(); got != "account-one" {
+		t.Fatalf("ChatGPTAccountID() = %q, want account-one", got)
+	}
 	if got, want := files[1].AuthIndex, "123456789012345678901234567890"; got != want {
 		t.Fatalf("numeric AuthIndex = %q, want %q", got, want)
+	}
+}
+
+func TestAuthFileChatGPTAccountIDAcceptsRawJWT(t *testing.T) {
+	t.Parallel()
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"https://api.openai.com/auth":{"chatgpt_account_id":"jwt-account"}}`))
+	raw, err := json.Marshal("header." + payload + ".signature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := (AuthFile{IDToken: raw}).ChatGPTAccountID(); got != "jwt-account" {
+		t.Fatalf("ChatGPTAccountID() = %q, want jwt-account", got)
+	}
+}
+
+func TestCodexQuotaUsesManagementAPICallAndDecodesWindows(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/prefix/v0/management/api-call" {
+			t.Errorf("request = %s %s, want POST management api-call", r.Method, r.URL.Path)
+		}
+		if got, want := r.Header.Get("Authorization"), "Bearer "+testManagementKey; got != want {
+			t.Errorf("Authorization = %q, want %q", got, want)
+		}
+		var request struct {
+			AuthIndex string            `json:"auth_index"`
+			Method    string            `json:"method"`
+			URL       string            `json:"url"`
+			Header    map[string]string `json:"header"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.AuthIndex != "auth-one" || request.Method != http.MethodGet || request.URL != codexUsageURL {
+			t.Errorf("api-call request = %#v", request)
+		}
+		if request.Header["Authorization"] != "Bearer $TOKEN$" || request.Header["Chatgpt-Account-Id"] != "account-one" || request.Header["User-Agent"] == "" {
+			t.Errorf("api-call headers = %#v", request.Header)
+		}
+		usage := `{"plan_type":"plus","rate_limit":{"allowed":true,"primary_window":{"used_percent":12.5,"limit_window_seconds":18000,"reset_after_seconds":600},"secondary_window":{"used_percent":"47.25","limit_window_seconds":604800,"reset_at":1784000000}}}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"status_code": 200, "body": usage})
+	}))
+	defer server.Close()
+
+	quota, err := mustClient(t, server.URL+"/prefix", time.Second).CodexQuota(context.Background(), "auth-one", "account-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quota.PlanType != "plus" || len(quota.Windows) != 2 {
+		t.Fatalf("quota = %#v", quota)
+	}
+	primary, weekly := quota.Windows[0], quota.Windows[1]
+	if primary.Kind != QuotaWindowFiveHour || primary.UsedPercent == nil || *primary.UsedPercent != 12.5 || primary.ResetAfter != 10*time.Minute {
+		t.Fatalf("primary window = %#v", primary)
+	}
+	if weekly.Kind != QuotaWindowWeekly || weekly.UsedPercent == nil || *weekly.UsedPercent != 47.25 || weekly.ResetAt.Unix() != 1784000000 {
+		t.Fatalf("weekly window = %#v", weekly)
+	}
+}
+
+func TestCodexQuotaRejectsUpstreamAndMalformedResponses(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "upstream status", body: `{"status_code":401,"body":"secret provider body"}`},
+		{name: "malformed envelope", body: `{"status_code":`},
+		{name: "malformed usage", body: `{"status_code":200,"body":"not-json"}`},
+		{name: "missing windows", body: `{"status_code":200,"body":"{\\"rate_limit\\":{}}"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+			_, err := mustClient(t, server.URL, time.Second).CodexQuota(context.Background(), "auth-one", "")
+			if err == nil {
+				t.Fatal("CodexQuota() error = nil")
+			}
+			if strings.Contains(err.Error(), "secret provider body") || strings.Contains(err.Error(), testManagementKey) {
+				t.Fatalf("CodexQuota() leaked response data: %v", err)
+			}
+		})
 	}
 }
 
