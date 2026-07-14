@@ -78,7 +78,7 @@ func TestManagerNewAlertsAreSentActivatedSortedAndDeduplicated(t *testing.T) {
 	}
 }
 
-func TestManagerAggregatesManyConditionsIntoOneDelivery(t *testing.T) {
+func TestManagerSendsEachAccountConditionAsItsOwnDelivery(t *testing.T) {
 	t.Parallel()
 	sender := newFakeSender()
 	store := newFakeStore()
@@ -92,10 +92,14 @@ func TestManagerAggregatesManyConditionsIntoOneDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	batches := sender.Batches()
-	if len(batches) != 1 || len(batches[0].Events) != 30 {
-		t.Fatalf("batches/events = %d/%d, want 1/30", len(batches), len(batches[0].Events))
+	if len(batches) != 30 {
+		t.Fatalf("batches = %d, want 30", len(batches))
 	}
-	for i, event := range batches[0].Events {
+	for i, batch := range batches {
+		if len(batch.Events) != 1 {
+			t.Fatalf("batch %d events = %d, want 1", i, len(batch.Events))
+		}
+		event := batch.Events[0]
 		if want := fmt.Sprintf("auth:%02d", i); event.Key != want {
 			t.Fatalf("event %d key = %q, want %q", i, event.Key, want)
 		}
@@ -182,7 +186,7 @@ func TestManagerRecoveryMailSucceedsOnceThenDeletes(t *testing.T) {
 	}
 }
 
-func TestManagerAlertBatchFailureRetriesAtomically(t *testing.T) {
+func TestManagerAccountAlertFailureDoesNotBlockOtherAccounts(t *testing.T) {
 	t.Parallel()
 
 	sendError := errors.New("SMTP unavailable")
@@ -202,29 +206,29 @@ func TestManagerAlertBatchFailureRetriesAtomically(t *testing.T) {
 	if _, ok := store.Record("auth:a"); ok {
 		t.Error("failed alert was activated")
 	}
-	if _, ok := store.Record("auth:b"); ok {
-		t.Error("alert from failed batch was activated")
+	if _, ok := store.Record("auth:b"); !ok {
+		t.Error("successful account alert was not activated")
 	}
-	if got := store.SaveCalls(); got != 0 {
-		t.Errorf("Save calls = %d, want 0", got)
+	if got := store.SaveCalls(); got != 1 {
+		t.Errorf("Save calls = %d, want 1", got)
 	}
 
 	if err := manager.Reconcile(context.Background(), batch); err != nil {
 		t.Fatalf("retry Reconcile() error = %v", err)
 	}
-	assertEventKeys(t, sender.Events(), []string{"auth:a", "auth:b", "auth:a", "auth:b"})
+	assertEventKeys(t, sender.Events(), []string{"auth:a", "auth:b", "auth:a"})
 	if _, ok := store.Record("auth:a"); !ok {
 		t.Error("retried alert was not activated")
 	}
 	if _, ok := store.Record("auth:b"); !ok {
 		t.Error("retried alert batch did not activate auth:b")
 	}
-	if got := store.SaveCalls(); got != 1 {
-		t.Errorf("Save calls after retry = %d, want 1", got)
+	if got := store.SaveCalls(); got != 2 {
+		t.Errorf("Save calls after retry = %d, want 2", got)
 	}
 }
 
-func TestManagerRecoveryBatchFailureRetriesAtomically(t *testing.T) {
+func TestManagerAccountRecoveryFailureDoesNotBlockOtherAccounts(t *testing.T) {
 	t.Parallel()
 
 	sendError := errors.New("recovery send failed")
@@ -244,22 +248,25 @@ func TestManagerRecoveryBatchFailureRetriesAtomically(t *testing.T) {
 	if _, ok := store.Record("auth:a"); !ok {
 		t.Error("failed recovery removed active key")
 	}
-	if _, ok := store.Record("auth:b"); !ok {
-		t.Error("failed recovery batch removed active key")
+	if _, ok := store.Record("auth:b"); ok {
+		t.Error("successful account recovery retained active key")
 	}
-	if got := store.SaveCalls(); got != 0 {
-		t.Errorf("Save calls = %d, want 0", got)
+	if got := store.SaveCalls(); got != 1 {
+		t.Errorf("Save calls = %d, want 1", got)
 	}
 
 	if err := manager.Reconcile(context.Background(), healthy); err != nil {
 		t.Fatalf("retry Reconcile() error = %v", err)
 	}
-	assertEventKeys(t, sender.Events(), []string{"auth:a", "auth:b", "auth:a", "auth:b"})
+	assertEventKeys(t, sender.Events(), []string{"auth:a", "auth:b", "auth:a"})
 	if _, ok := store.Record("auth:a"); ok {
 		t.Error("successful recovery retry retained active key")
 	}
 	if _, ok := store.Record("auth:b"); ok {
 		t.Error("successful recovery retry retained auth:b")
+	}
+	if got := store.SaveCalls(); got != 2 {
+		t.Errorf("Save calls after retry = %d, want 2", got)
 	}
 }
 
@@ -307,6 +314,9 @@ func TestManagerOperationsAcrossAlertsAndRecoveriesAreSortedAndSaveOnce(t *testi
 	}
 	events := sender.Events()
 	assertEventKeys(t, events, []string{"auth:a", "auth:z", "auth:m"})
+	if got := len(sender.Batches()); got != 3 {
+		t.Fatalf("notification batches = %d, want one per account event", got)
+	}
 	if kinds, want := []mailer.Kind{events[0].Kind, events[1].Kind, events[2].Kind}, []mailer.Kind{mailer.Alert, mailer.Alert, mailer.Recovery}; !reflect.DeepEqual(kinds, want) {
 		t.Errorf("event kinds = %v, want %v", kinds, want)
 	}

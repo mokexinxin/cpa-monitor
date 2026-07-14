@@ -25,8 +25,9 @@ type Reconciler interface {
 	Reconcile(context.Context, rule.Batch) error
 }
 
-// HealthReporter receives a snapshot only after every monitoring scope is
-// complete, error-free, and has no active condition.
+// HealthReporter receives a snapshot after the four server scopes are
+// complete, error-free, and healthy. Account monitoring is independent and
+// never blocks the scheduled server-status report.
 type HealthReporter interface {
 	ReportHealthy(context.Context, HealthSnapshot) error
 }
@@ -43,6 +44,7 @@ type HealthSnapshot struct {
 	ServicePort            int
 	ServicePortConnections int
 	ServicePortThreshold   int
+	AccountUsageAvailable  bool
 	AccountCount           int
 	EnabledAccountCount    int
 	AccountUsages          []AccountUsage
@@ -252,6 +254,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return joinContextError(runErrors, err)
 	}
+	serverRunErrorCount := len(runErrors)
 
 	files, authErr := r.api.AuthFiles(ctx)
 	if err := ctx.Err(); err != nil {
@@ -272,14 +275,19 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		return joinContextError(runErrors, err)
 	}
 
-	if len(runErrors) == 0 && batchesHealthy(healthBatch, memoryBatch, diskBatch, tcpBatch, authBatch) && r.healthReporter != nil {
+	if serverRunErrorCount == 0 && batchesHealthy(healthBatch, memoryBatch, diskBatch, tcpBatch) && r.healthReporter != nil {
 		highestDisk := 0.0
 		for _, disk := range disks.Disks {
 			if disk.UsedPercent > highestDisk {
 				highestDisk = disk.UsedPercent
 			}
 		}
-		accountUsages := enabledAccountUsages(files)
+		accountUsages := []AccountUsage(nil)
+		accountCount := 0
+		if authErr == nil {
+			accountUsages = enabledAccountUsages(files)
+			accountCount = len(files)
+		}
 		snapshot := HealthSnapshot{
 			MemoryUsedPercent:      memory.UsedPercent,
 			MemoryThreshold:        r.memoryPercent,
@@ -291,7 +299,8 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			ServicePort:            r.servicePort,
 			ServicePortConnections: tcp.ServicePortConnections,
 			ServicePortThreshold:   r.servicePortConnections,
-			AccountCount:           len(files),
+			AccountUsageAvailable:  authErr == nil,
+			AccountCount:           accountCount,
 			EnabledAccountCount:    len(accountUsages),
 			AccountUsages:          accountUsages,
 		}

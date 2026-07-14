@@ -124,18 +124,18 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decodedSubject != "[CPA Monitor] 健康报告："+report.Hostname {
+	if decodedSubject != "[CPA Monitor] 服务器状态报告："+report.Hostname {
 		t.Fatalf("Subject = %q", decodedSubject)
 	}
 	parts := readAlternative(t, msg)
 	plain := string(parts["text/plain"])
-	for _, want := range []string{"状态: 健康 - 所有检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 进程累计 15 次（成功 12 / 失败 3）；近期 4 次（成功 3 / 失败 1）"} {
+	for _, want := range []string{"状态: 健康 - 服务器四项检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 进程累计 15 次（成功 12 / 失败 3）；近期 4 次（成功 3 / 失败 1）"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain body does not contain %q:\n%s", want, plain)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"健康", "所有系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "进程累计 15 次", "下次计划报告"} {
+	for _, want := range []string{"健康", "服务器系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "进程累计 15 次", "下次计划报告"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -148,6 +148,30 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	}
 	if !strings.Contains(htmlBody, `<html lang="zh-CN">`) {
 		t.Fatal("Chinese HTML language metadata is missing")
+	}
+}
+
+func TestBuildHealthMessageAllowsUnavailableAccountUsage(t *testing.T) {
+	t.Parallel()
+	report := validHealthReport()
+	report.AccountUsageAvailable = false
+	report.AccountCount = 0
+	report.EnabledAccountCount = 0
+	report.AccountUsages = nil
+
+	raw, err := BuildHealthMessage("monitor@example.com", []string{"admin@example.com"}, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := readAlternative(t, msg)
+	for contentType, body := range parts {
+		if !strings.Contains(string(body), "账号用量") || !strings.Contains(string(body), "暂不可用") {
+			t.Fatalf("%s body did not explain unavailable account usage", contentType)
+		}
 	}
 }
 
@@ -200,11 +224,11 @@ func TestBuildMessagesInEnglish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := msg.Header.Get("Subject"), "[CPA Monitor] HEALTHY monitor-01"; got != want {
+	if got, want := msg.Header.Get("Subject"), "[CPA Monitor] SERVER STATUS monitor-01"; got != want {
 		t.Fatalf("Subject = %q, want %q", got, want)
 	}
 	parts = readAlternative(t, msg)
-	if !strings.Contains(string(parts["text/plain"]), "Status: HEALTHY - all checks passed") || !strings.Contains(string(parts["text/html"]), "All systems are operating normally") {
+	if !strings.Contains(string(parts["text/plain"]), "Status: HEALTHY - all four server checks passed") || !strings.Contains(string(parts["text/html"]), "Server systems are operating normally") {
 		t.Fatal("English health message was not localized")
 	}
 	if !strings.Contains(string(parts["text/plain"]), "Account usage one@example.test (codex): process total 15 (success 12 / failed 3); recent 4 (success 3 / failed 1)") || !strings.Contains(string(parts["text/html"]), "Enabled account usage") {
@@ -320,6 +344,7 @@ func validHealthReport() HealthReport {
 		ServicePort:            8317,
 		ServicePortConnections: 11,
 		ServicePortThreshold:   800,
+		AccountUsageAvailable:  true,
 		AccountCount:           3,
 		EnabledAccountCount:    2,
 		AccountUsages: []notification.AccountUsage{

@@ -29,7 +29,7 @@ func TestManagerSendsFirstHealthyCycleThenAtIntervalAcrossRestart(t *testing.T) 
 	if len(sender.reports) != 1 {
 		t.Fatalf("reports = %d, want immediate first report", len(sender.reports))
 	}
-	if got := sender.reports[0]; got.Hostname != "monitor-01" || got.MemoryUsedPercent != 42.5 || !got.NextScheduledAt.Equal(start.Add(24*time.Hour)) || got.EnabledAccountCount != 2 || len(got.AccountUsages) != 2 || got.AccountUsages[0].Label != "one@example.test" || got.AccountUsages[0].RecentSuccess != 2 {
+	if got := sender.reports[0]; got.Hostname != "monitor-01" || got.MemoryUsedPercent != 42.5 || !got.NextScheduledAt.Equal(start.Add(24*time.Hour)) || !got.AccountUsageAvailable || got.EnabledAccountCount != 2 || len(got.AccountUsages) != 2 || got.AccountUsages[0].Label != "one@example.test" || got.AccountUsages[0].RecentSuccess != 2 {
 		t.Fatalf("report = %#v", got)
 	}
 
@@ -139,6 +139,7 @@ func testSnapshot() monitor.HealthSnapshot {
 		ServicePort:            8317,
 		ServicePortConnections: 11,
 		ServicePortThreshold:   800,
+		AccountUsageAvailable:  true,
 		AccountCount:           3,
 		EnabledAccountCount:    2,
 		AccountUsages: []monitor.AccountUsage{

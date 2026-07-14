@@ -66,7 +66,7 @@ func TestHealthPayload(t *testing.T) {
 		Hostname: "host-a", Timestamp: now, NextScheduledAt: now.Add(time.Hour), BaseURL: "http://127.0.0.1:8317",
 		MemoryUsedPercent: 10, MemoryThreshold: 80, DiskMountCount: 2, HighestDiskUsedPercent: 20, DiskThreshold: 80,
 		TotalTCPConnections: 3, TotalTCPThreshold: 3000, ServicePort: 8317, ServicePortConnections: 2,
-		ServicePortThreshold: 800, AccountCount: 4, EnabledAccountCount: 2,
+		ServicePortThreshold: 800, AccountUsageAvailable: true, AccountCount: 4, EnabledAccountCount: 2,
 		AccountUsages: []notification.AccountUsage{
 			{Label: "one@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 2, RecentFailed: 1},
 			{Label: "team-two", Provider: "claude", Success: 4},
@@ -75,8 +75,27 @@ func TestHealthPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Markdown.Title != "CPA Monitor · Healthy" || !strings.Contains(payload.Markdown.Text, "All monitoring checks passed") || !strings.Contains(payload.Markdown.Text, "2 enabled / 4 checked") || !strings.Contains(payload.Markdown.Text, "one@example.test (codex)") || !strings.Contains(payload.Markdown.Text, "process total 15 (success 12 / failed 3); recent 3 (success 2 / failed 1)") {
+	if payload.Markdown.Title != "CPA Monitor · Server Status" || !strings.Contains(payload.Markdown.Text, "All four server checks passed") || !strings.Contains(payload.Markdown.Text, "2 enabled / 4 checked") || !strings.Contains(payload.Markdown.Text, "one@example.test (codex)") || !strings.Contains(payload.Markdown.Text, "process total 15 (success 12 / failed 3); recent 3 (success 2 / failed 1)") {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestHealthPayloadReportsUnavailableAccountUsageWithoutFailingServerStatus(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 1, 2, 3, 0, time.UTC)
+	payload, err := healthPayload(notification.HealthReport{
+		Hostname: "host-a", Timestamp: now, NextScheduledAt: now.Add(time.Hour), BaseURL: "http://127.0.0.1:8317",
+		MemoryUsedPercent: 10, MemoryThreshold: 80, DiskMountCount: 2, HighestDiskUsedPercent: 20, DiskThreshold: 80,
+		TotalTCPConnections: 3, TotalTCPThreshold: 3000, ServicePort: 8317, ServicePortConnections: 2,
+		ServicePortThreshold: 800,
+	}, "zh-CN", atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"服务器状态报告", "服务器四项监控检查均已通过", "账号用量", "暂不可用", "不影响服务器状态报告"} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Fatalf("markdown missing %q:\n%s", want, payload.Markdown.Text)
+		}
 	}
 }
 

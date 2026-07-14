@@ -159,7 +159,7 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 		t.Fatalf("snapshots = %d, want 1", len(reporter.snapshots))
 	}
 	got := reporter.snapshots[0]
-	if got.MemoryUsedPercent != 42.5 || got.HighestDiskUsedPercent != 51.2 || got.DiskMountCount != 2 || got.TotalTCPConnections != 4 || got.ServicePortConnections != 2 || got.AccountCount != 3 || got.EnabledAccountCount != 2 {
+	if got.MemoryUsedPercent != 42.5 || got.HighestDiskUsedPercent != 51.2 || got.DiskMountCount != 2 || got.TotalTCPConnections != 4 || got.ServicePortConnections != 2 || !got.AccountUsageAvailable || got.AccountCount != 3 || got.EnabledAccountCount != 2 {
 		t.Fatalf("snapshot = %#v", got)
 	}
 	wantUsages := []AccountUsage{
@@ -169,6 +169,53 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 	if !reflect.DeepEqual(got.AccountUsages, wantUsages) {
 		t.Fatalf("account usages = %#v, want %#v", got.AccountUsages, wantUsages)
 	}
+}
+
+func TestRunnerAccountProblemsDoNotSuppressServerStatusReport(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unhealthy account", func(t *testing.T) {
+		reporter := &recordingHealthReporter{}
+		runner := newTestRunner(t, Options{
+			API: &fakeAPI{files: []cliproxy.AuthFile{{
+				AuthIndex: "account-1", Email: "user@example.test", Status: "error", StatusMessage: "quota exhausted",
+			}}},
+			HealthReporter: reporter,
+		})
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(reporter.snapshots) != 1 || !reporter.snapshots[0].AccountUsageAvailable || reporter.snapshots[0].EnabledAccountCount != 1 {
+			t.Fatalf("snapshots = %#v", reporter.snapshots)
+		}
+	})
+
+	t.Run("account API failure", func(t *testing.T) {
+		reporter := &recordingHealthReporter{}
+		authErr := errors.New("management unavailable")
+		runner := newTestRunner(t, Options{API: &fakeAPI{authErr: authErr}, HealthReporter: reporter})
+		if err := runner.RunOnce(context.Background()); !errors.Is(err, authErr) {
+			t.Fatalf("RunOnce() error = %v, want auth error", err)
+		}
+		if len(reporter.snapshots) != 1 || reporter.snapshots[0].AccountUsageAvailable || reporter.snapshots[0].AccountCount != 0 || len(reporter.snapshots[0].AccountUsages) != 0 {
+			t.Fatalf("snapshots = %#v", reporter.snapshots)
+		}
+	})
+
+	t.Run("account alert delivery failure", func(t *testing.T) {
+		reporter := &recordingHealthReporter{}
+		reconcileErr := errors.New("account alert failed")
+		runner := newTestRunner(t, Options{
+			Reconciler:     &recordingReconciler{errorsByScope: map[string]error{rule.ScopeAuth: reconcileErr}},
+			HealthReporter: reporter,
+		})
+		if err := runner.RunOnce(context.Background()); !errors.Is(err, reconcileErr) {
+			t.Fatalf("RunOnce() error = %v, want reconcile error", err)
+		}
+		if len(reporter.snapshots) != 1 {
+			t.Fatalf("snapshots = %#v", reporter.snapshots)
+		}
+	})
 }
 
 func TestRunnerSuppressesHealthyReportForConditionOrIncompleteScope(t *testing.T) {

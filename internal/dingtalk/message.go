@@ -98,34 +98,42 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 	if err := validateLanguage(language); err != nil {
 		return markdownPayload{}, err
 	}
-	title := "CPA Monitor · Healthy"
+	title := "CPA Monitor · Server Status"
 	var text strings.Builder
 	writeMentions(&text, at)
 	if language == "zh-CN" {
-		title = "CPA Monitor · 健康报告"
+		title = "CPA Monitor · 服务器状态报告"
 		text.WriteString("## " + title + "\n\n")
-		text.WriteString("> 所有监控检查均已通过，当前没有活动告警。\n\n")
+		text.WriteString("> 服务器四项监控检查均已通过；账号状态与告警独立处理。\n\n")
 		writeMarkdownField(&text, "主机", report.Hostname)
 		writeMarkdownField(&text, "检查时间", report.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
 		writeMarkdownField(&text, "内存", fmt.Sprintf("已使用 %.1f%%（阈值 %.1f%%）", report.MemoryUsedPercent, report.MemoryThreshold))
 		writeMarkdownField(&text, "磁盘", fmt.Sprintf("%d 个挂载点，最高 %.1f%%（阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
 		writeMarkdownField(&text, "TCP", fmt.Sprintf("共 %d 个连接（阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeMarkdownField(&text, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
-		writeMarkdownField(&text, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
-		writeAccountUsages(&text, report.AccountUsages, language)
+		if report.AccountUsageAvailable {
+			writeMarkdownField(&text, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
+			writeAccountUsages(&text, report.AccountUsages, language)
+		} else {
+			writeMarkdownField(&text, "账号用量", "暂不可用（账号检查失败，不影响服务器状态报告）")
+		}
 		writeMarkdownField(&text, "CLIProxyAPI 地址", report.BaseURL)
 		writeMarkdownField(&text, "下次计划报告", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	} else {
 		text.WriteString("## " + title + "\n\n")
-		text.WriteString("> All monitoring checks passed and there are no active alerts.\n\n")
+		text.WriteString("> All four server checks passed; account status and alerts are handled independently.\n\n")
 		writeMarkdownField(&text, "Host", report.Hostname)
 		writeMarkdownField(&text, "Checked at", report.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
 		writeMarkdownField(&text, "Memory", fmt.Sprintf("%.1f%% used (threshold %.1f%%)", report.MemoryUsedPercent, report.MemoryThreshold))
 		writeMarkdownField(&text, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (threshold %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
 		writeMarkdownField(&text, "TCP", fmt.Sprintf("%d total connections (threshold %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeMarkdownField(&text, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (threshold %d)", report.ServicePortConnections, report.ServicePortThreshold))
-		writeMarkdownField(&text, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
-		writeAccountUsages(&text, report.AccountUsages, language)
+		if report.AccountUsageAvailable {
+			writeMarkdownField(&text, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
+			writeAccountUsages(&text, report.AccountUsages, language)
+		} else {
+			writeMarkdownField(&text, "Account usage", "temporarily unavailable (account check failed; server status reporting is unaffected)")
+		}
 		writeMarkdownField(&text, "CLIProxyAPI base URL", report.BaseURL)
 		writeMarkdownField(&text, "Next scheduled report", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
@@ -139,8 +147,14 @@ func validateHealthReport(report notification.HealthReport) error {
 	if strings.TrimSpace(report.BaseURL) == "" {
 		return errors.New("DingTalk health report base URL is required")
 	}
-	if report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount || report.EnabledAccountCount != len(report.AccountUsages) {
+	if report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount {
 		return errors.New("DingTalk health report account counts are invalid")
+	}
+	if report.AccountUsageAvailable && report.EnabledAccountCount != len(report.AccountUsages) {
+		return errors.New("DingTalk health report enabled account count is invalid")
+	}
+	if !report.AccountUsageAvailable && (report.AccountCount != 0 || report.EnabledAccountCount != 0 || len(report.AccountUsages) != 0) {
+		return errors.New("DingTalk unavailable account usage must not contain counters")
 	}
 	for _, usage := range report.AccountUsages {
 		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {

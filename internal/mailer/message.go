@@ -94,8 +94,8 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 	timestamp := report.Timestamp.UTC()
 	var plain strings.Builder
 	if language == LanguageChinese {
-		plain.WriteString("CPA Monitor 健康报告\r\n\r\n")
-		writeBodyField(&plain, "状态", "健康 - 所有检查均已通过")
+		plain.WriteString("CPA Monitor 服务器状态报告\r\n\r\n")
+		writeBodyField(&plain, "状态", "健康 - 服务器四项检查均已通过")
 		writeBodyField(&plain, "主机", report.Hostname)
 		writeBodyField(&plain, "检查时间", timestamp.Format(time.RFC3339))
 		writeBodyField(&plain, "CLIProxyAPI", "可访问")
@@ -103,13 +103,17 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, "磁盘", fmt.Sprintf("%d 个挂载点中最高使用率 %.1f%%（告警阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
 		writeBodyField(&plain, "TCP", fmt.Sprintf("共 %d 个连接（告警阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeBodyField(&plain, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（告警阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
-		writeBodyField(&plain, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
-		writePlainAccountUsages(&plain, report.AccountUsages, language)
+		if report.AccountUsageAvailable {
+			writeBodyField(&plain, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
+			writePlainAccountUsages(&plain, report.AccountUsages, language)
+		} else {
+			writeBodyField(&plain, "账号用量", "暂不可用（账号检查失败，不影响服务器状态报告）")
+		}
 		writeBodyField(&plain, "CLIProxyAPI 地址", report.BaseURL)
 		writeBodyField(&plain, "下次计划报告", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	} else {
-		plain.WriteString("CPA Monitor health report\r\n\r\n")
-		writeBodyField(&plain, "Status", "HEALTHY - all checks passed")
+		plain.WriteString("CPA Monitor server status report\r\n\r\n")
+		writeBodyField(&plain, "Status", "HEALTHY - all four server checks passed")
 		writeBodyField(&plain, "Host", report.Hostname)
 		writeBodyField(&plain, "Checked at", timestamp.Format(time.RFC3339))
 		writeBodyField(&plain, "CLIProxyAPI", "reachable")
@@ -117,16 +121,20 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (alert at %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
 		writeBodyField(&plain, "TCP", fmt.Sprintf("%d total (alert at %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeBodyField(&plain, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (alert at %d)", report.ServicePortConnections, report.ServicePortThreshold))
-		writeBodyField(&plain, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
-		writePlainAccountUsages(&plain, report.AccountUsages, language)
+		if report.AccountUsageAvailable {
+			writeBodyField(&plain, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
+			writePlainAccountUsages(&plain, report.AccountUsages, language)
+		} else {
+			writeBodyField(&plain, "Account usage", "temporarily unavailable (account check failed; server status reporting is unaffected)")
+		}
 		writeBodyField(&plain, "CLIProxyAPI base URL", report.BaseURL)
 		writeBodyField(&plain, "Next scheduled report", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	}
 
 	body := renderHealthHTML(report, language)
-	subject := "[CPA Monitor] HEALTHY " + report.Hostname
+	subject := "[CPA Monitor] SERVER STATUS " + report.Hostname
 	if language == LanguageChinese {
-		subject = "[CPA Monitor] 健康报告：" + report.Hostname
+		subject = "[CPA Monitor] 服务器状态报告：" + report.Hostname
 	}
 	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
 }
@@ -228,23 +236,34 @@ func renderHealthHTML(report HealthReport, language string) string {
 	memoryNote := fmt.Sprintf("Alert at %.1f%%", report.MemoryThreshold)
 	diskNote := fmt.Sprintf("%d mount(s) · alert at %.1f%%", report.DiskMountCount, report.DiskThreshold)
 	tcpNote, portNote := fmt.Sprintf("Alert at %d", report.TotalTCPThreshold), fmt.Sprintf("Alert at %d", report.ServicePortThreshold)
-	badge, heading, summary, nextLabel := "HEALTHY", "All systems are operating normally", "All five monitoring scopes completed successfully with no active conditions.", "Next scheduled report"
-	rows := [][2]string{{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"}, {"Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount)}, {"Base URL", report.BaseURL}}
-	preheader := "Healthy · CPA Monitor"
+	badge, heading, summary, nextLabel := "HEALTHY", "Server systems are operating normally", "All four server scopes completed successfully. Account status and alerts are handled independently.", "Next scheduled report"
+	accountSummary := "Temporarily unavailable"
+	if report.AccountUsageAvailable {
+		accountSummary = fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount)
+	}
+	rows := [][2]string{{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"}, {"Account usage", accountSummary}, {"Base URL", report.BaseURL}}
+	preheader := "Server status · CPA Monitor"
 	if language == LanguageChinese {
 		memoryLabel, diskLabel, tcpLabel, portLabel = "内存", "最高磁盘使用率", "TCP 连接总数", fmt.Sprintf("端口 %d", report.ServicePort)
 		memoryNote = fmt.Sprintf("告警阈值 %.1f%%", report.MemoryThreshold)
 		diskNote = fmt.Sprintf("%d 个挂载点 · 告警阈值 %.1f%%", report.DiskMountCount, report.DiskThreshold)
 		tcpNote, portNote = fmt.Sprintf("告警阈值 %d", report.TotalTCPThreshold), fmt.Sprintf("告警阈值 %d", report.ServicePortThreshold)
-		badge, heading, summary, nextLabel = "健康", "所有系统运行正常", "五项监控检查均已成功完成，当前没有活动告警。", "下次计划报告"
-		rows = [][2]string{{"主机", report.Hostname}, {"检查时间", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "可访问"}, {"账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount)}, {"服务地址", report.BaseURL}}
-		preheader = "健康 · CPA Monitor"
+		badge, heading, summary, nextLabel = "健康", "服务器系统运行正常", "服务器四项监控检查均已成功完成；账号状态与告警独立处理。", "下次计划报告"
+		accountSummary = "暂不可用"
+		if report.AccountUsageAvailable {
+			accountSummary = fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount)
+		}
+		rows = [][2]string{{"主机", report.Hostname}, {"检查时间", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "可访问"}, {"账号用量", accountSummary}, {"服务地址", report.BaseURL}}
+		preheader = "服务器状态 · CPA Monitor"
 	}
 	memoryCard := metricCard(memoryLabel, fmt.Sprintf("%.1f%%", report.MemoryUsedPercent), memoryNote)
 	diskCard := metricCard(diskLabel, fmt.Sprintf("%.1f%%", report.HighestDiskUsedPercent), diskNote)
 	tcpCard := metricCard(tcpLabel, fmt.Sprintf("%d", report.TotalTCPConnections), tcpNote)
 	portCard := metricCard(portLabel, fmt.Sprintf("%d", report.ServicePortConnections), portNote)
-	accountUsageSection := renderAccountUsageHTML(report.AccountUsages, language)
+	accountUsageSection := ""
+	if report.AccountUsageAvailable {
+		accountUsageSection = renderAccountUsageHTML(report.AccountUsages, language)
+	}
 	return emailShell(preheader, fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0"><tr>
 <td><span style="display:inline-block;padding:7px 12px;border:1px solid #bbf7d0;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:700;letter-spacing:.08em">%s</span></td>
@@ -346,8 +365,14 @@ func validateHealthReport(report HealthReport) error {
 			return fmt.Errorf("health report percentages must be between 0 and 100")
 		}
 	}
-	if report.MemoryThreshold <= 0 || report.DiskThreshold <= 0 || report.DiskMountCount < 0 || report.TotalTCPConnections < 0 || report.TotalTCPThreshold <= 0 || report.ServicePort < 1 || report.ServicePort > 65535 || report.ServicePortConnections < 0 || report.ServicePortThreshold <= 0 || report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount || report.EnabledAccountCount != len(report.AccountUsages) {
+	if report.MemoryThreshold <= 0 || report.DiskThreshold <= 0 || report.DiskMountCount < 0 || report.TotalTCPConnections < 0 || report.TotalTCPThreshold <= 0 || report.ServicePort < 1 || report.ServicePort > 65535 || report.ServicePortConnections < 0 || report.ServicePortThreshold <= 0 || report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount {
 		return fmt.Errorf("health report counters and thresholds are invalid")
+	}
+	if report.AccountUsageAvailable && report.EnabledAccountCount != len(report.AccountUsages) {
+		return fmt.Errorf("health report enabled account count is invalid")
+	}
+	if !report.AccountUsageAvailable && (report.AccountCount != 0 || report.EnabledAccountCount != 0 || len(report.AccountUsages) != 0) {
+		return fmt.Errorf("unavailable account usage must not contain counters")
 	}
 	for _, usage := range report.AccountUsages {
 		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {

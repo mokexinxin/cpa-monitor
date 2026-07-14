@@ -55,10 +55,10 @@ func NewManager(sender Sender, store Store, hostname, baseURL string, sendRecove
 }
 
 // Reconcile sends new alerts and, for a complete batch only, recovers active
-// keys missing from the batch. Each kind is delivered atomically as one batch,
-// with events sorted by key. If any in-memory mutation succeeds, Save is
-// attempted once. A failed Save stays dirty and is retried by the next valid
-// batch without resending already-active alerts.
+// keys missing from the batch. Auth events are delivered one account per
+// message; other scopes remain aggregated by kind. If any in-memory mutation
+// succeeds, Save is attempted once. A failed Save stays dirty and is retried by
+// the next valid batch without resending already-active alerts.
 func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 	if m == nil {
 		return errors.New("reconcile alerts: nil manager")
@@ -106,10 +106,10 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 
 	var reconcileErrors []error
 	mutated := false
-	if len(newConditions) > 0 {
+	for _, group := range conditionDeliveryGroups(batch.Scope, newConditions) {
 		timestamp := m.timestamp()
-		events := make([]notification.Event, 0, len(newConditions))
-		for _, condition := range newConditions {
+		events := make([]notification.Event, 0, len(group))
+		for _, condition := range group {
 			events = append(events, m.alertEvent(condition, timestamp))
 		}
 		notificationBatch := notification.Batch{
@@ -119,7 +119,7 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 		if err := m.sender.SendBatch(ctx, notificationBatch); err != nil {
 			reconcileErrors = append(reconcileErrors, fmt.Errorf("send alert batch for scope %q keys %q: %w", batch.Scope, eventKeys(events), err))
 		} else {
-			for _, condition := range newConditions {
+			for _, condition := range group {
 				if err := m.store.Put(recordFromCondition(condition, timestamp)); err != nil {
 					reconcileErrors = append(reconcileErrors, fmt.Errorf("activate alert %q: %w", condition.Key, err))
 					continue
@@ -129,12 +129,12 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 		}
 	}
 
-	if len(recovered) > 0 {
+	for _, group := range recoveryDeliveryGroups(batch.Scope, recovered) {
 		delivered := true
 		if m.sendRecovery {
 			timestamp := m.timestamp()
-			events := make([]notification.Event, 0, len(recovered))
-			for _, record := range recovered {
+			events := make([]notification.Event, 0, len(group))
+			for _, record := range group {
 				events = append(events, m.recoveryEvent(record, timestamp))
 			}
 			notificationBatch := notification.Batch{
@@ -147,7 +147,7 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 			}
 		}
 		if delivered {
-			for _, record := range recovered {
+			for _, record := range group {
 				if m.store.Delete(record.Key) {
 					mutated = true
 				}
@@ -166,6 +166,34 @@ func (m *Manager) Reconcile(ctx context.Context, batch rule.Batch) error {
 		}
 	}
 	return errors.Join(reconcileErrors...)
+}
+
+func conditionDeliveryGroups(scope string, conditions []rule.Condition) [][]rule.Condition {
+	if len(conditions) == 0 {
+		return nil
+	}
+	if scope != rule.ScopeAuth {
+		return [][]rule.Condition{conditions}
+	}
+	groups := make([][]rule.Condition, len(conditions))
+	for i := range conditions {
+		groups[i] = conditions[i : i+1]
+	}
+	return groups
+}
+
+func recoveryDeliveryGroups(scope string, records []state.Record) [][]state.Record {
+	if len(records) == 0 {
+		return nil
+	}
+	if scope != rule.ScopeAuth {
+		return [][]state.Record{records}
+	}
+	groups := make([][]state.Record, len(records))
+	for i := range records {
+		groups[i] = records[i : i+1]
+	}
+	return groups
 }
 
 func eventKeys(events []notification.Event) []string {

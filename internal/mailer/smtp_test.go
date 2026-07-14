@@ -185,11 +185,11 @@ func TestSendHealthDeliversMultipartReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := message.Header.Get("Subject"); got != "[CPA Monitor] HEALTHY monitor-01" {
+	if got := message.Header.Get("Subject"); got != "[CPA Monitor] SERVER STATUS monitor-01" {
 		t.Fatalf("Subject = %q", got)
 	}
 	parts := readAlternative(t, message)
-	if !strings.Contains(string(parts["text/html"]), "All systems are operating normally") {
+	if !strings.Contains(string(parts["text/html"]), "Server systems are operating normally") {
 		t.Fatal("delivered HTML health report is missing status heading")
 	}
 }

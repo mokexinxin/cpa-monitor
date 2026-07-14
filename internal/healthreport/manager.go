@@ -111,6 +111,7 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		ServicePort:            snapshot.ServicePort,
 		ServicePortConnections: snapshot.ServicePortConnections,
 		ServicePortThreshold:   snapshot.ServicePortThreshold,
+		AccountUsageAvailable:  snapshot.AccountUsageAvailable,
 		AccountCount:           snapshot.AccountCount,
 		EnabledAccountCount:    snapshot.EnabledAccountCount,
 		AccountUsages:          make([]notification.AccountUsage, len(snapshot.AccountUsages)),

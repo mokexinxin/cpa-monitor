@@ -281,22 +281,26 @@ health_report:
   channel: dingtalk # empty follows alerts.primary_channel
 ```
 
-A report is eligible only after all five scopes—CLIProxyAPI health, memory,
-disk, TCP, and accounts—finish successfully with no active condition. The
-first eligible cycle sends immediately. Later reports follow `interval`; a
-failed delivery waits for `retry_interval` before retrying. Delivery times
-are stored with alert state, so restarting the service does not send a
-duplicate message.
+A server-status report is eligible after the four server scopes—CLIProxyAPI
+health, memory, disk, and TCP—finish successfully with no server condition.
+Account conditions, account-check failures, and account-alert delivery failures
+never block this report. The first eligible cycle sends immediately. Later
+reports follow `interval`; a failed delivery waits for `retry_interval` before
+retrying. Delivery times are stored with alert state, so restarting the service
+does not send a duplicate message.
 
 The SMTP HTML report uses an email-client-safe responsive card layout, high-contrast
 status labels, and escaped dynamic content. A plain-text alternative is always
-included. DingTalk and SMTP health reports also list request usage for every
+included. DingTalk and SMTP server-status reports also list request usage for every
 enabled account: the CLIProxyAPI process-lifetime success/failure counters and
 the totals from its rolling `recent_requests` window. Disabled accounts are not
 expanded in the usage list, while the report still shows both enabled and total
 checked account counts. These counters describe requests handled by CLIProxyAPI;
-they are not provider subscription-quota percentages. Alert and recovery emails
-use the same multipart HTML/text format.
+they are not provider subscription-quota percentages. When account usage cannot
+be fetched, the server report marks it unavailable and is still delivered.
+Account alerts and recoveries are sent as separate messages per account, apart
+from the periodic server report. Alert and recovery emails use the same
+multipart HTML/text format.
 
 To enable it on an existing systemd installation:
 

@@ -56,6 +56,7 @@ type HealthReport struct {
 	ServicePort            int
 	ServicePortConnections int
 	ServicePortThreshold   int
+	AccountUsageAvailable  bool
 	AccountCount           int
 	EnabledAccountCount    int
 	AccountUsages          []AccountUsage
