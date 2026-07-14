@@ -30,11 +30,14 @@ func TestManagerSendsFirstHealthyCycleThenAtIntervalAcrossRestart(t *testing.T) 
 	if len(sender.reports) != 1 {
 		t.Fatalf("reports = %d, want immediate first report", len(sender.reports))
 	}
-	if got := sender.reports[0]; got.Hostname != "monitor-01" || got.MemoryUsedPercent != 42.5 || !got.NextScheduledAt.Equal(start.Add(24*time.Hour)) || !got.AccountUsageAvailable || got.EnabledAccountCount != 2 || len(got.AccountUsages) != 2 || got.AccountUsages[0].Label != "one@example.test" || got.AccountUsages[0].RecentSuccess != 2 || !got.AccountUsages[0].QuotaAvailable || len(got.AccountUsages[0].QuotaWindows) != 2 || got.AccountUsages[0].QuotaWindows[1].Kind != "weekly" {
+	if got := sender.reports[0]; got.Hostname != "monitor-01" || got.MemoryUsedPercent != 42.5 || !got.NextScheduledAt.Equal(start.Add(24*time.Hour)) || !got.AccountUsageAvailable || got.EnabledAccountCount != 2 || len(got.AccountUsages) != 2 || got.AccountUsages[0].Label != "one@example.test" || got.AccountUsages[0].RecentSuccess != 2 || !got.AccountUsages[0].QuotaAvailable || len(got.AccountUsages[0].QuotaWindows) != 2 || got.AccountUsages[0].QuotaWindows[1].Kind != "weekly" || !got.VersionCheckAvailable || got.CurrentVersion != "v7.2.70" || got.LatestVersion != "v7.2.74" || !got.UpdateAvailable || got.ReleaseURL != cliproxy.CLIProxyAPIReleasesURL {
 		t.Fatalf("report = %#v", got)
 	}
 	if calls := manager.quotaFetcher.(*recordingQuotaFetcher).calls; len(calls) != 1 || calls[0] != "auth-one/account-one" {
 		t.Fatalf("quota calls = %#v", calls)
+	}
+	if calls := manager.versionFetcher.(*recordingVersionFetcher).calls; calls != 1 {
+		t.Fatalf("version calls = %d, want 1", calls)
 	}
 
 	manager.now = func() time.Time { return start.Add(23 * time.Hour) }
@@ -47,6 +50,9 @@ func TestManagerSendsFirstHealthyCycleThenAtIntervalAcrossRestart(t *testing.T) 
 	if calls := manager.quotaFetcher.(*recordingQuotaFetcher).calls; len(calls) != 1 {
 		t.Fatalf("quota calls before interval = %#v, want no additional lookup", calls)
 	}
+	if calls := manager.versionFetcher.(*recordingVersionFetcher).calls; calls != 1 {
+		t.Fatalf("version calls before interval = %d, want no additional lookup", calls)
+	}
 
 	reloaded, err := state.Open(path)
 	if err != nil {
@@ -58,6 +64,25 @@ func TestManagerSendsFirstHealthyCycleThenAtIntervalAcrossRestart(t *testing.T) 
 	}
 	if len(sender.reports) != 2 {
 		t.Fatalf("reports after interval and restart = %d, want 2", len(sender.reports))
+	}
+}
+
+func TestManagerVersionFailureDoesNotBlockServerReport(t *testing.T) {
+	t.Parallel()
+	sender := &recordingSender{}
+	store := state.New(filepath.Join(t.TempDir(), "alerts.json"))
+	manager := newTestManager(t, sender, store, time.Date(2026, 7, 14, 6, 0, 0, 0, time.UTC))
+	manager.versionFetcher = &recordingVersionFetcher{err: errors.New("GitHub unavailable")}
+
+	if err := manager.ReportHealthy(context.Background(), testSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sender.reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(sender.reports))
+	}
+	report := sender.reports[0]
+	if report.VersionCheckAvailable || report.CurrentVersion != "" || report.LatestVersion != "" || report.UpdateAvailable || report.ReleaseURL != cliproxy.CLIProxyAPIReleasesURL {
+		t.Fatalf("version failure report = %#v", report)
 	}
 }
 
@@ -140,12 +165,13 @@ func (s *recordingSender) SendHealth(_ context.Context, report notification.Heal
 func newTestManager(t *testing.T, sender Sender, store Store, now time.Time) *Manager {
 	t.Helper()
 	manager, err := New(sender, store, Options{
-		Enabled:       true,
-		Interval:      24 * time.Hour,
-		RetryInterval: 15 * time.Minute,
-		Hostname:      "monitor-01",
-		BaseURL:       "http://127.0.0.1:8317",
-		QuotaFetcher:  &recordingQuotaFetcher{},
+		Enabled:        true,
+		Interval:       24 * time.Hour,
+		RetryInterval:  15 * time.Minute,
+		Hostname:       "monitor-01",
+		BaseURL:        "http://127.0.0.1:8317",
+		QuotaFetcher:   &recordingQuotaFetcher{},
+		VersionFetcher: &recordingVersionFetcher{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -179,6 +205,24 @@ func testSnapshot() monitor.HealthSnapshot {
 type recordingQuotaFetcher struct {
 	calls []string
 	err   error
+}
+
+type recordingVersionFetcher struct {
+	calls int
+	err   error
+}
+
+func (f *recordingVersionFetcher) VersionStatus(context.Context) (cliproxy.VersionStatus, error) {
+	f.calls++
+	if f.err != nil {
+		return cliproxy.VersionStatus{}, f.err
+	}
+	return cliproxy.VersionStatus{
+		CurrentVersion:      "v7.2.70",
+		LatestVersion:       "v7.2.74",
+		ComparisonAvailable: true,
+		UpdateAvailable:     true,
+	}, nil
 }
 
 func (f *recordingQuotaFetcher) CodexQuota(_ context.Context, authIndex, accountID string) (cliproxy.CodexQuota, error) {

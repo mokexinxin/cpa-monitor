@@ -61,6 +61,12 @@ type HealthReport struct {
 	AccountCount           int
 	EnabledAccountCount    int
 	AccountUsages          []AccountUsage
+	VersionCheckAvailable  bool
+	CurrentVersion         string
+	LatestVersion          string
+	VersionComparable      bool
+	UpdateAvailable        bool
+	ReleaseURL             string
 }
 
 // AccountUsage is the transport-neutral request-usage summary for one enabled
@@ -113,6 +119,26 @@ func ValidateAccountUsage(usage AccountUsage) error {
 				return errors.New("account quota used percent must be between 0 and 100")
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateVersionInfo checks the transport-neutral CLIProxyAPI update block.
+func ValidateVersionInfo(report HealthReport) error {
+	if strings.TrimSpace(report.ReleaseURL) == "" {
+		return errors.New("CLIProxyAPI release URL is required")
+	}
+	if !report.VersionCheckAvailable {
+		if report.VersionComparable || report.UpdateAvailable || strings.TrimSpace(report.CurrentVersion) != "" || strings.TrimSpace(report.LatestVersion) != "" {
+			return errors.New("unavailable CLIProxyAPI version check contains version data")
+		}
+		return nil
+	}
+	if strings.TrimSpace(report.CurrentVersion) == "" || strings.TrimSpace(report.LatestVersion) == "" {
+		return errors.New("available CLIProxyAPI version check requires current and latest versions")
+	}
+	if report.UpdateAvailable && !report.VersionComparable {
+		return errors.New("CLIProxyAPI update status requires a comparable version")
 	}
 	return nil
 }

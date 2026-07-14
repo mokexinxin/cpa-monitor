@@ -12,7 +12,8 @@ It checks:
 - all TCP entries in `/proc/net/tcp` and `/proc/net/tcp6`;
 - account availability from `GET /v0/management/auth-files`;
 - Codex 5-hour and weekly plan usage through the protected management
-  `POST /v0/management/api-call` endpoint.
+  `POST /v0/management/api-call` endpoint;
+- the running CLIProxyAPI version against its latest GitHub release.
 
 Alerts can be sent through a signed DingTalk custom group robot, SMTP, or a
 primary/fallback combination. The same key is suppressed until it recovers.
@@ -307,6 +308,13 @@ server report plus every other account's quota are still delivered. If the
 auth-files check itself fails, the server report marks all account usage
 unavailable and is still delivered. Codex plan usage requires a CLIProxyAPI
 version that exposes `POST /v0/management/api-call`.
+At the bottom of every scheduled report, CPA Monitor also calls the protected
+`GET /v0/management/latest-version` endpoint. It reads the running version from
+CLIProxyAPI's `X-CPA-VERSION` response header, compares it with the latest
+GitHub release, and shows the current version, latest version, update status,
+and the [CLIProxyAPI releases page](https://github.com/router-for-me/CLIProxyAPI/releases).
+An available update is highlighted in DingTalk and email. A failed or
+uncomparable version check is marked in the report and never blocks delivery.
 Account alerts and recoveries are sent as separate messages per account, apart
 from the periodic server report. Alert and recovery emails use the same
 multipart HTML/text format.

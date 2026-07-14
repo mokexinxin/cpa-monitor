@@ -95,13 +95,14 @@ func buildRuntime(cfg config.Config, console io.Writer) (*Runtime, error) {
 		healthSender = transports.health[cfg.Alerts.PrimaryChannel]
 	}
 	healthManager, err := healthreport.New(healthSender, store, healthreport.Options{
-		Enabled:       cfg.HealthReport.Enabled,
-		Interval:      cfg.HealthReport.Interval.Duration,
-		RetryInterval: cfg.HealthReport.RetryInterval.Duration,
-		Hostname:      hostname,
-		BaseURL:       cfg.CLIProxy.BaseURL,
-		Logger:        logger,
-		QuotaFetcher:  api,
+		Enabled:        cfg.HealthReport.Enabled,
+		Interval:       cfg.HealthReport.Interval.Duration,
+		RetryInterval:  cfg.HealthReport.RetryInterval.Duration,
+		Hostname:       hostname,
+		BaseURL:        cfg.CLIProxy.BaseURL,
+		Logger:         logger,
+		QuotaFetcher:   api,
+		VersionFetcher: api,
 	})
 	if err != nil {
 		return closeOnError(fmt.Errorf("initialize healthy report manager: %w", err))

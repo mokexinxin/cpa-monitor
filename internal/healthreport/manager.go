@@ -25,6 +25,12 @@ type QuotaFetcher interface {
 	CodexQuota(context.Context, string, string) (cliproxy.CodexQuota, error)
 }
 
+// VersionFetcher retrieves the running and latest CLIProxyAPI versions only
+// when a scheduled report is due.
+type VersionFetcher interface {
+	VersionStatus(context.Context) (cliproxy.VersionStatus, error)
+}
+
 type Store interface {
 	HealthReport() state.HealthReportState
 	SetHealthReport(state.HealthReportState) error
@@ -32,27 +38,29 @@ type Store interface {
 }
 
 type Options struct {
-	Enabled       bool
-	Interval      time.Duration
-	RetryInterval time.Duration
-	Hostname      string
-	BaseURL       string
-	Logger        *slog.Logger
-	QuotaFetcher  QuotaFetcher
+	Enabled        bool
+	Interval       time.Duration
+	RetryInterval  time.Duration
+	Hostname       string
+	BaseURL        string
+	Logger         *slog.Logger
+	QuotaFetcher   QuotaFetcher
+	VersionFetcher VersionFetcher
 }
 
 type Manager struct {
-	mu            sync.Mutex
-	sender        Sender
-	store         Store
-	enabled       bool
-	interval      time.Duration
-	retryInterval time.Duration
-	hostname      string
-	baseURL       string
-	logger        *slog.Logger
-	quotaFetcher  QuotaFetcher
-	now           func() time.Time
+	mu             sync.Mutex
+	sender         Sender
+	store          Store
+	enabled        bool
+	interval       time.Duration
+	retryInterval  time.Duration
+	hostname       string
+	baseURL        string
+	logger         *slog.Logger
+	quotaFetcher   QuotaFetcher
+	versionFetcher VersionFetcher
+	now            func() time.Time
 }
 
 func New(sender Sender, store Store, options Options) (*Manager, error) {
@@ -79,16 +87,17 @@ func New(sender Sender, store Store, options Options) (*Manager, error) {
 		logger = slog.Default()
 	}
 	return &Manager{
-		sender:        sender,
-		store:         store,
-		enabled:       options.Enabled,
-		interval:      options.Interval,
-		retryInterval: options.RetryInterval,
-		hostname:      options.Hostname,
-		baseURL:       options.BaseURL,
-		logger:        logger,
-		quotaFetcher:  options.QuotaFetcher,
-		now:           time.Now,
+		sender:         sender,
+		store:          store,
+		enabled:        options.Enabled,
+		interval:       options.Interval,
+		retryInterval:  options.RetryInterval,
+		hostname:       options.Hostname,
+		baseURL:        options.BaseURL,
+		logger:         logger,
+		quotaFetcher:   options.QuotaFetcher,
+		versionFetcher: options.VersionFetcher,
+		now:            time.Now,
 	}, nil
 }
 
@@ -126,6 +135,7 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		AccountCount:           snapshot.AccountCount,
 		EnabledAccountCount:    snapshot.EnabledAccountCount,
 		AccountUsages:          make([]notification.AccountUsage, len(snapshot.AccountUsages)),
+		ReleaseURL:             cliproxy.CLIProxyAPIReleasesURL,
 	}
 	for i, usage := range snapshot.AccountUsages {
 		report.AccountUsages[i] = notification.AccountUsage{
@@ -138,6 +148,7 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		}
 		m.addQuota(ctx, usage, &report.AccountUsages[i])
 	}
+	m.addVersion(ctx, &report)
 	sendErr := m.sender.SendHealth(ctx, report)
 	current.LastAttemptAt = now
 	if sendErr == nil {
@@ -153,6 +164,32 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		m.logger.InfoContext(ctx, "healthy report sent", "next_scheduled_at", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	}
 	return sendErr
+}
+
+func (m *Manager) addVersion(ctx context.Context, report *notification.HealthReport) {
+	if report == nil {
+		return
+	}
+	if m.versionFetcher == nil {
+		m.logger.WarnContext(ctx, "CLIProxyAPI version check unavailable", "reason", "version fetcher is not configured")
+		return
+	}
+	status, err := m.versionFetcher.VersionStatus(ctx)
+	if err != nil {
+		m.logger.WarnContext(ctx, "CLIProxyAPI version check unavailable", "error", err)
+		return
+	}
+	candidate := *report
+	candidate.VersionCheckAvailable = true
+	candidate.CurrentVersion = status.CurrentVersion
+	candidate.LatestVersion = status.LatestVersion
+	candidate.VersionComparable = status.ComparisonAvailable
+	candidate.UpdateAvailable = status.UpdateAvailable
+	if err := notification.ValidateVersionInfo(candidate); err != nil {
+		m.logger.WarnContext(ctx, "CLIProxyAPI version check unavailable", "error", err)
+		return
+	}
+	*report = candidate
 }
 
 func (m *Manager) addQuota(ctx context.Context, source monitor.AccountUsage, target *notification.AccountUsage) {

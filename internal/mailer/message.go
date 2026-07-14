@@ -130,6 +130,7 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, "CLIProxyAPI base URL", report.BaseURL)
 		writeBodyField(&plain, "Next scheduled report", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	}
+	writePlainVersionStatus(&plain, report, language)
 
 	body := renderHealthHTML(report, language)
 	subject := "[CPA Monitor] SERVER STATUS " + report.Hostname
@@ -137,6 +138,50 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		subject = "[CPA Monitor] 服务器状态报告：" + report.Hostname
 	}
 	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
+}
+
+func writePlainVersionStatus(plain *strings.Builder, report HealthReport, language string) {
+	plain.WriteString("\r\n")
+	if language == LanguageChinese {
+		plain.WriteString("CLIProxyAPI 版本\r\n")
+		if report.VersionCheckAvailable {
+			writeBodyField(plain, "当前版本", report.CurrentVersion)
+			writeBodyField(plain, "最新版本", report.LatestVersion)
+			switch {
+			case !report.VersionComparable:
+				writeBodyField(plain, "更新状态", "无法比较版本，请打开发布页面确认")
+			case report.UpdateAvailable:
+				writeBodyField(plain, "更新状态", "发现新版本，请安排升级")
+			default:
+				writeBodyField(plain, "更新状态", "已是最新版本")
+			}
+		} else {
+			writeBodyField(plain, "当前版本", "暂不可用")
+			writeBodyField(plain, "最新版本", "暂不可用")
+			writeBodyField(plain, "更新状态", "版本检查失败，不影响服务器状态报告")
+		}
+		writeBodyField(plain, "发布地址", report.ReleaseURL)
+		return
+	}
+
+	plain.WriteString("CLIProxyAPI version\r\n")
+	if report.VersionCheckAvailable {
+		writeBodyField(plain, "Current version", report.CurrentVersion)
+		writeBodyField(plain, "Latest version", report.LatestVersion)
+		switch {
+		case !report.VersionComparable:
+			writeBodyField(plain, "Update status", "versions could not be compared; check the releases page")
+		case report.UpdateAvailable:
+			writeBodyField(plain, "Update status", "a newer version is available")
+		default:
+			writeBodyField(plain, "Update status", "up to date")
+		}
+	} else {
+		writeBodyField(plain, "Current version", "unavailable")
+		writeBodyField(plain, "Latest version", "unavailable")
+		writeBodyField(plain, "Update status", "version check failed; server status reporting is unaffected")
+	}
+	writeBodyField(plain, "Releases", report.ReleaseURL)
 }
 
 func writePlainAccountUsages(plain *strings.Builder, usages []notification.AccountUsage, language string, checkedAt time.Time) {
@@ -264,6 +309,7 @@ func renderHealthHTML(report HealthReport, language string) string {
 	if report.AccountUsageAvailable {
 		accountUsageSection = renderAccountUsageHTML(report.AccountUsages, language, report.Timestamp)
 	}
+	versionSection := renderVersionStatusHTML(report, language)
 	return emailShell(preheader, fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0"><tr>
 <td><span style="display:inline-block;padding:7px 12px;border:1px solid #bbf7d0;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:700;letter-spacing:.08em">%s</span></td>
@@ -272,7 +318,45 @@ func renderHealthHTML(report HealthReport, language string) string {
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="margin-top:20px;border-collapse:collapse"><tr>%s%s</tr><tr>%s%s</tr></table>
 <div style="margin-top:20px">%s</div>
 %s
-<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), accountUsageSection, html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339))), language)
+<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>
+%s`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), accountUsageSection, html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339)), versionSection), language)
+}
+
+func renderVersionStatusHTML(report HealthReport, language string) string {
+	heading, currentLabel, latestLabel, statusLabel, releasesLabel := "CLIProxyAPI version", "Current version", "Latest version", "Update status", "Releases"
+	current, latest, status := "Unavailable", "Unavailable", "Version check failed; server status reporting is unaffected."
+	border, background, color := "#d0d5dd", "#f8fafc", "#475467"
+	separator := ":"
+	if report.VersionCheckAvailable {
+		current, latest = report.CurrentVersion, report.LatestVersion
+		switch {
+		case !report.VersionComparable:
+			status = "Versions could not be compared; check the releases page."
+		case report.UpdateAvailable:
+			status = "A newer version is available."
+			border, background, color = "#fedf89", "#fffaeb", "#93370d"
+		default:
+			status = "Up to date."
+			border, background, color = "#bbf7d0", "#f0fdf4", "#166534"
+		}
+	}
+	if language == LanguageChinese {
+		separator = "："
+		heading, currentLabel, latestLabel, statusLabel, releasesLabel = "CLIProxyAPI 版本", "当前版本", "最新版本", "更新状态", "发布地址"
+		current, latest, status = "暂不可用", "暂不可用", "版本检查失败，不影响服务器状态报告。"
+		if report.VersionCheckAvailable {
+			current, latest = report.CurrentVersion, report.LatestVersion
+			switch {
+			case !report.VersionComparable:
+				status = "无法比较版本，请打开发布页面确认。"
+			case report.UpdateAvailable:
+				status = "发现新版本，请安排升级。"
+			case !report.UpdateAvailable:
+				status = "已是最新版本。"
+			}
+		}
+	}
+	return fmt.Sprintf(`<div style="margin-top:20px;padding:16px;border:1px solid %s;border-radius:10px;background:%s;color:%s"><div style="font-size:15px;font-weight:700">%s</div><div style="margin-top:10px;font-size:13px;line-height:1.65"><strong>%s%s</strong>%s<br><strong>%s%s</strong>%s<br><strong>%s%s</strong>%s<br><strong>%s%s</strong><a href="%s" style="color:inherit">%s</a></div></div>`, border, background, color, html.EscapeString(heading), html.EscapeString(currentLabel), separator, html.EscapeString(current), html.EscapeString(latestLabel), separator, html.EscapeString(latest), html.EscapeString(statusLabel), separator, html.EscapeString(status), html.EscapeString(releasesLabel), separator, html.EscapeString(report.ReleaseURL), html.EscapeString(report.ReleaseURL))
 }
 
 func renderAccountUsageHTML(usages []notification.AccountUsage, language string, checkedAt time.Time) string {
@@ -448,6 +532,9 @@ func validateHealthReport(report HealthReport) error {
 		if notification.ValidateAccountUsage(usage) != nil {
 			return fmt.Errorf("health report account usage is invalid")
 		}
+	}
+	if err := notification.ValidateVersionInfo(report); err != nil {
+		return fmt.Errorf("health report version status is invalid: %w", err)
 	}
 	return nil
 }

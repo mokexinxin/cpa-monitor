@@ -129,13 +129,13 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	}
 	parts := readAlternative(t, msg)
 	plain := string(parts["text/plain"])
-	for _, want := range []string{"状态: 健康 - 服务器四项检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 套餐 plus；5 小时限额：已用 12.5%", "周限额：已用 47.2%，剩余 52.8%", "请求统计：进程累计 15 次（成功 12 / 失败 3）"} {
+	for _, want := range []string{"状态: 健康 - 服务器四项检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 套餐 plus；5 小时限额：已用 12.5%", "周限额：已用 47.2%，剩余 52.8%", "请求统计：进程累计 15 次（成功 12 / 失败 3）", "当前版本: v7.2.70", "最新版本: v7.2.74", "更新状态: 发现新版本，请安排升级"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain body does not contain %q:\n%s", want, plain)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"健康", "服务器系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "5 小时限额", "周限额", "进程累计 15 次", "下次计划报告"} {
+	for _, want := range []string{"健康", "服务器系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "5 小时限额", "周限额", "进程累计 15 次", "下次计划报告", "CLIProxyAPI 版本", "v7.2.70", "v7.2.74", "发现新版本", "https://github.com/router-for-me/CLIProxyAPI/releases"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -199,6 +199,32 @@ func TestBuildHealthMessageKeepsServerReportWhenCodexQuotaFails(t *testing.T) {
 	}
 }
 
+func TestBuildHealthMessageKeepsServerReportWhenVersionCheckFails(t *testing.T) {
+	t.Parallel()
+	report := validHealthReport()
+	report.VersionCheckAvailable = false
+	report.CurrentVersion = ""
+	report.LatestVersion = ""
+	report.VersionComparable = false
+	report.UpdateAvailable = false
+
+	raw, err := BuildHealthMessage("monitor@example.com", []string{"admin@example.com"}, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := readAlternative(t, msg)
+	for contentType, body := range parts {
+		text := string(body)
+		if !strings.Contains(text, "CLIProxyAPI 版本") || !strings.Contains(text, "版本检查失败") || !strings.Contains(text, report.ReleaseURL) {
+			t.Fatalf("%s body did not preserve version failure notice", contentType)
+		}
+	}
+}
+
 func TestBuildMessageRecoverySubject(t *testing.T) {
 	t.Parallel()
 
@@ -257,6 +283,9 @@ func TestBuildMessagesInEnglish(t *testing.T) {
 	}
 	if !strings.Contains(string(parts["text/plain"]), "Account usage one@example.test (codex): plan plus; 5-hour limit: 12.5% used, 87.5% remaining") || !strings.Contains(string(parts["text/plain"]), "weekly limit: 47.2% used, 52.8% remaining") || !strings.Contains(string(parts["text/html"]), "Enabled account usage") {
 		t.Fatal("English account usage was not rendered")
+	}
+	if !strings.Contains(string(parts["text/plain"]), "Current version: v7.2.70") || !strings.Contains(string(parts["text/plain"]), "Latest version: v7.2.74") || !strings.Contains(string(parts["text/plain"]), "a newer version is available") {
+		t.Fatal("English CLIProxyAPI update reminder was not rendered")
 	}
 	if !strings.Contains(string(parts["text/html"]), `<html lang="en">`) {
 		t.Fatal("English HTML language metadata is missing")
@@ -371,6 +400,12 @@ func validHealthReport() HealthReport {
 		AccountUsageAvailable:  true,
 		AccountCount:           3,
 		EnabledAccountCount:    2,
+		VersionCheckAvailable:  true,
+		CurrentVersion:         "v7.2.70",
+		LatestVersion:          "v7.2.74",
+		VersionComparable:      true,
+		UpdateAvailable:        true,
+		ReleaseURL:             "https://github.com/router-for-me/CLIProxyAPI/releases",
 		AccountUsages: []notification.AccountUsage{
 			{Label: "one@example.test", Provider: "codex", PlanType: "plus", QuotaSupported: true, QuotaAvailable: true, QuotaWindows: []notification.QuotaWindow{
 				{Kind: "five_hour", UsedPercent: testQuotaPercent(12.5), ResetAfter: 10 * time.Minute},

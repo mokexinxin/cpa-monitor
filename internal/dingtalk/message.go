@@ -138,6 +138,7 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		writeMarkdownField(&text, "CLIProxyAPI base URL", report.BaseURL)
 		writeMarkdownField(&text, "Next scheduled report", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
+	writeVersionStatus(&text, report, language)
 	return markdownPayload{MessageType: "markdown", Markdown: markdownContent{Title: truncateRunes(title, 100), Text: fitMarkdown(text.String(), language)}, At: at}, nil
 }
 
@@ -162,7 +163,53 @@ func validateHealthReport(report notification.HealthReport) error {
 			return errors.New("DingTalk health report account usage is invalid")
 		}
 	}
+	if notification.ValidateVersionInfo(report) != nil {
+		return errors.New("DingTalk health report version status is invalid")
+	}
 	return nil
+}
+
+func writeVersionStatus(text *strings.Builder, report notification.HealthReport, language string) {
+	if language == "zh-CN" {
+		text.WriteString("\n### CLIProxyAPI 版本\n\n")
+		if report.VersionCheckAvailable {
+			writeMarkdownField(text, "当前版本", report.CurrentVersion)
+			writeMarkdownField(text, "最新版本", report.LatestVersion)
+			switch {
+			case !report.VersionComparable:
+				writeMarkdownField(text, "更新状态", "无法比较版本，请打开发布页面确认")
+			case report.UpdateAvailable:
+				writeMarkdownField(text, "更新状态", "⚠️ 发现新版本，请安排升级")
+			default:
+				writeMarkdownField(text, "更新状态", "已是最新版本")
+			}
+		} else {
+			writeMarkdownField(text, "当前版本", "暂不可用")
+			writeMarkdownField(text, "最新版本", "暂不可用")
+			writeMarkdownField(text, "更新状态", "版本检查失败，不影响服务器状态报告")
+		}
+		writeMarkdownField(text, "发布地址", report.ReleaseURL)
+		return
+	}
+
+	text.WriteString("\n### CLIProxyAPI version\n\n")
+	if report.VersionCheckAvailable {
+		writeMarkdownField(text, "Current version", report.CurrentVersion)
+		writeMarkdownField(text, "Latest version", report.LatestVersion)
+		switch {
+		case !report.VersionComparable:
+			writeMarkdownField(text, "Update status", "versions could not be compared; check the releases page")
+		case report.UpdateAvailable:
+			writeMarkdownField(text, "Update status", "⚠️ a newer version is available")
+		default:
+			writeMarkdownField(text, "Update status", "up to date")
+		}
+	} else {
+		writeMarkdownField(text, "Current version", "unavailable")
+		writeMarkdownField(text, "Latest version", "unavailable")
+		writeMarkdownField(text, "Update status", "version check failed; server status reporting is unaffected")
+	}
+	writeMarkdownField(text, "Releases", report.ReleaseURL)
 }
 
 func writeAccountUsages(text *strings.Builder, usages []notification.AccountUsage, language string, checkedAt time.Time) {
