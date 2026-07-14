@@ -111,7 +111,8 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		writeMarkdownField(&text, "磁盘", fmt.Sprintf("%d 个挂载点，最高 %.1f%%（阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
 		writeMarkdownField(&text, "TCP", fmt.Sprintf("共 %d 个连接（阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeMarkdownField(&text, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
-		writeMarkdownField(&text, "账号", fmt.Sprintf("已检查 %d 个", report.AccountCount))
+		writeMarkdownField(&text, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
+		writeAccountUsages(&text, report.AccountUsages, language)
 		writeMarkdownField(&text, "CLIProxyAPI 地址", report.BaseURL)
 		writeMarkdownField(&text, "下次计划报告", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	} else {
@@ -123,7 +124,8 @@ func healthPayload(report notification.HealthReport, language string, at atConte
 		writeMarkdownField(&text, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (threshold %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
 		writeMarkdownField(&text, "TCP", fmt.Sprintf("%d total connections (threshold %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeMarkdownField(&text, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (threshold %d)", report.ServicePortConnections, report.ServicePortThreshold))
-		writeMarkdownField(&text, "Accounts", fmt.Sprintf("%d checked", report.AccountCount))
+		writeMarkdownField(&text, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
+		writeAccountUsages(&text, report.AccountUsages, language)
 		writeMarkdownField(&text, "CLIProxyAPI base URL", report.BaseURL)
 		writeMarkdownField(&text, "Next scheduled report", report.NextScheduledAt.UTC().Format("2006-01-02 15:04:05 UTC"))
 	}
@@ -137,7 +139,38 @@ func validateHealthReport(report notification.HealthReport) error {
 	if strings.TrimSpace(report.BaseURL) == "" {
 		return errors.New("DingTalk health report base URL is required")
 	}
+	if report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount || report.EnabledAccountCount != len(report.AccountUsages) {
+		return errors.New("DingTalk health report account counts are invalid")
+	}
+	for _, usage := range report.AccountUsages {
+		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {
+			return errors.New("DingTalk health report account usage is invalid")
+		}
+	}
 	return nil
+}
+
+func writeAccountUsages(text *strings.Builder, usages []notification.AccountUsage, language string) {
+	if len(usages) == 0 {
+		return
+	}
+	if language == "zh-CN" {
+		text.WriteString("\n### 已启用账号用量\n\n")
+	} else {
+		text.WriteString("\n### Enabled account usage\n\n")
+	}
+	for _, usage := range usages {
+		label := usage.Label
+		if provider := strings.TrimSpace(usage.Provider); provider != "" {
+			label += " (" + provider + ")"
+		}
+		total, recent := usage.Success+usage.Failed, usage.RecentSuccess+usage.RecentFailed
+		if language == "zh-CN" {
+			writeMarkdownField(text, label, fmt.Sprintf("进程累计 %d 次（成功 %d / 失败 %d）；近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+		} else {
+			writeMarkdownField(text, label, fmt.Sprintf("process total %d (success %d / failed %d); recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed))
+		}
+	}
 }
 
 func validateLanguage(language string) error {

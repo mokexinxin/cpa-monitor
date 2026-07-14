@@ -103,7 +103,8 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, "磁盘", fmt.Sprintf("%d 个挂载点中最高使用率 %.1f%%（告警阈值 %.1f%%）", report.DiskMountCount, report.HighestDiskUsedPercent, report.DiskThreshold))
 		writeBodyField(&plain, "TCP", fmt.Sprintf("共 %d 个连接（告警阈值 %d）", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeBodyField(&plain, fmt.Sprintf("服务端口 %d", report.ServicePort), fmt.Sprintf("%d 个连接（告警阈值 %d）", report.ServicePortConnections, report.ServicePortThreshold))
-		writeBodyField(&plain, "账号", fmt.Sprintf("已检查 %d 个", report.AccountCount))
+		writeBodyField(&plain, "账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount))
+		writePlainAccountUsages(&plain, report.AccountUsages, language)
 		writeBodyField(&plain, "CLIProxyAPI 地址", report.BaseURL)
 		writeBodyField(&plain, "下次计划报告", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	} else {
@@ -116,7 +117,8 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		writeBodyField(&plain, "Disk", fmt.Sprintf("%.1f%% highest across %d mount(s) (alert at %.1f%%)", report.HighestDiskUsedPercent, report.DiskMountCount, report.DiskThreshold))
 		writeBodyField(&plain, "TCP", fmt.Sprintf("%d total (alert at %d)", report.TotalTCPConnections, report.TotalTCPThreshold))
 		writeBodyField(&plain, fmt.Sprintf("Service port %d", report.ServicePort), fmt.Sprintf("%d connections (alert at %d)", report.ServicePortConnections, report.ServicePortThreshold))
-		writeBodyField(&plain, "Accounts", fmt.Sprintf("%d checked", report.AccountCount))
+		writeBodyField(&plain, "Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount))
+		writePlainAccountUsages(&plain, report.AccountUsages, language)
 		writeBodyField(&plain, "CLIProxyAPI base URL", report.BaseURL)
 		writeBodyField(&plain, "Next scheduled report", report.NextScheduledAt.UTC().Format(time.RFC3339))
 	}
@@ -127,6 +129,17 @@ func BuildHealthMessageInLanguage(from string, to []string, report HealthReport,
 		subject = "[CPA Monitor] 健康报告：" + report.Hostname
 	}
 	return buildAlternative(from, to, timestamp, subject, plain.String(), body)
+}
+
+func writePlainAccountUsages(plain *strings.Builder, usages []notification.AccountUsage, language string) {
+	for _, usage := range usages {
+		label := accountUsageLabel(usage)
+		if language == LanguageChinese {
+			writeBodyField(plain, "账号用量 "+label, accountUsageText(usage, language))
+		} else {
+			writeBodyField(plain, "Account usage "+label, accountUsageText(usage, language))
+		}
+	}
 }
 
 func buildAlternative(from string, to []string, timestamp time.Time, subject, plain, htmlBody string) ([]byte, error) {
@@ -216,7 +229,7 @@ func renderHealthHTML(report HealthReport, language string) string {
 	diskNote := fmt.Sprintf("%d mount(s) · alert at %.1f%%", report.DiskMountCount, report.DiskThreshold)
 	tcpNote, portNote := fmt.Sprintf("Alert at %d", report.TotalTCPThreshold), fmt.Sprintf("Alert at %d", report.ServicePortThreshold)
 	badge, heading, summary, nextLabel := "HEALTHY", "All systems are operating normally", "All five monitoring scopes completed successfully with no active conditions.", "Next scheduled report"
-	rows := [][2]string{{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"}, {"Accounts checked", fmt.Sprintf("%d", report.AccountCount)}, {"Base URL", report.BaseURL}}
+	rows := [][2]string{{"Host", report.Hostname}, {"Checked at", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "Reachable"}, {"Accounts", fmt.Sprintf("%d enabled / %d checked", report.EnabledAccountCount, report.AccountCount)}, {"Base URL", report.BaseURL}}
 	preheader := "Healthy · CPA Monitor"
 	if language == LanguageChinese {
 		memoryLabel, diskLabel, tcpLabel, portLabel = "内存", "最高磁盘使用率", "TCP 连接总数", fmt.Sprintf("端口 %d", report.ServicePort)
@@ -224,13 +237,14 @@ func renderHealthHTML(report HealthReport, language string) string {
 		diskNote = fmt.Sprintf("%d 个挂载点 · 告警阈值 %.1f%%", report.DiskMountCount, report.DiskThreshold)
 		tcpNote, portNote = fmt.Sprintf("告警阈值 %d", report.TotalTCPThreshold), fmt.Sprintf("告警阈值 %d", report.ServicePortThreshold)
 		badge, heading, summary, nextLabel = "健康", "所有系统运行正常", "五项监控检查均已成功完成，当前没有活动告警。", "下次计划报告"
-		rows = [][2]string{{"主机", report.Hostname}, {"检查时间", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "可访问"}, {"已检查账号", fmt.Sprintf("%d", report.AccountCount)}, {"服务地址", report.BaseURL}}
+		rows = [][2]string{{"主机", report.Hostname}, {"检查时间", timestamp.Format(time.RFC3339)}, {"CLIProxyAPI", "可访问"}, {"账号", fmt.Sprintf("已启用 %d 个 / 已检查 %d 个", report.EnabledAccountCount, report.AccountCount)}, {"服务地址", report.BaseURL}}
 		preheader = "健康 · CPA Monitor"
 	}
 	memoryCard := metricCard(memoryLabel, fmt.Sprintf("%.1f%%", report.MemoryUsedPercent), memoryNote)
 	diskCard := metricCard(diskLabel, fmt.Sprintf("%.1f%%", report.HighestDiskUsedPercent), diskNote)
 	tcpCard := metricCard(tcpLabel, fmt.Sprintf("%d", report.TotalTCPConnections), tcpNote)
 	portCard := metricCard(portLabel, fmt.Sprintf("%d", report.ServicePortConnections), portNote)
+	accountUsageSection := renderAccountUsageHTML(report.AccountUsages, language)
 	return emailShell(preheader, fmt.Sprintf(`
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0"><tr>
 <td><span style="display:inline-block;padding:7px 12px;border:1px solid #bbf7d0;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:700;letter-spacing:.08em">%s</span></td>
@@ -238,7 +252,39 @@ func renderHealthHTML(report HealthReport, language string) string {
 <tr><td style="padding-top:8px;font-size:15px;line-height:1.6;color:#475467">%s</td></tr></table>
 <table role="presentation" width="100%%" cellspacing="0" cellpadding="0" style="margin-top:20px;border-collapse:collapse"><tr>%s%s</tr><tr>%s%s</tr></table>
 <div style="margin-top:20px">%s</div>
-<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339))), language)
+%s
+<div style="margin-top:18px;padding:14px 16px;border-left:4px solid #1d4ed8;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.55"><strong>%s</strong><br>%s</div>`, html.EscapeString(badge), html.EscapeString(heading), html.EscapeString(summary), memoryCard, diskCard, tcpCard, portCard, detailTable(rows), accountUsageSection, html.EscapeString(nextLabel), html.EscapeString(next.Format(time.RFC3339))), language)
+}
+
+func renderAccountUsageHTML(usages []notification.AccountUsage, language string) string {
+	if len(usages) == 0 {
+		return ""
+	}
+	heading := "Enabled account usage"
+	if language == LanguageChinese {
+		heading = "已启用账号用量"
+	}
+	rows := make([][2]string, 0, len(usages))
+	for _, usage := range usages {
+		rows = append(rows, [2]string{accountUsageLabel(usage), accountUsageText(usage, language)})
+	}
+	return `<div style="margin-top:20px"><div style="margin-bottom:8px;font-size:15px;font-weight:700;color:#172033">` + html.EscapeString(heading) + `</div>` + detailTable(rows) + `</div>`
+}
+
+func accountUsageLabel(usage notification.AccountUsage) string {
+	label := strings.TrimSpace(usage.Label)
+	if provider := strings.TrimSpace(usage.Provider); provider != "" {
+		label += " (" + provider + ")"
+	}
+	return label
+}
+
+func accountUsageText(usage notification.AccountUsage, language string) string {
+	total, recent := usage.Success+usage.Failed, usage.RecentSuccess+usage.RecentFailed
+	if language == LanguageChinese {
+		return fmt.Sprintf("进程累计 %d 次（成功 %d / 失败 %d）；近期 %d 次（成功 %d / 失败 %d）", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed)
+	}
+	return fmt.Sprintf("process total %d (success %d / failed %d); recent %d (success %d / failed %d)", total, usage.Success, usage.Failed, recent, usage.RecentSuccess, usage.RecentFailed)
 }
 
 func emailShell(preheader, content, language string) string {
@@ -300,8 +346,13 @@ func validateHealthReport(report HealthReport) error {
 			return fmt.Errorf("health report percentages must be between 0 and 100")
 		}
 	}
-	if report.MemoryThreshold <= 0 || report.DiskThreshold <= 0 || report.DiskMountCount < 0 || report.TotalTCPConnections < 0 || report.TotalTCPThreshold <= 0 || report.ServicePort < 1 || report.ServicePort > 65535 || report.ServicePortConnections < 0 || report.ServicePortThreshold <= 0 || report.AccountCount < 0 {
+	if report.MemoryThreshold <= 0 || report.DiskThreshold <= 0 || report.DiskMountCount < 0 || report.TotalTCPConnections < 0 || report.TotalTCPThreshold <= 0 || report.ServicePort < 1 || report.ServicePort > 65535 || report.ServicePortConnections < 0 || report.ServicePortThreshold <= 0 || report.AccountCount < 0 || report.EnabledAccountCount < 0 || report.EnabledAccountCount > report.AccountCount || report.EnabledAccountCount != len(report.AccountUsages) {
 		return fmt.Errorf("health report counters and thresholds are invalid")
+	}
+	for _, usage := range report.AccountUsages {
+		if strings.TrimSpace(usage.Label) == "" || usage.Success < 0 || usage.Failed < 0 || usage.RecentSuccess < 0 || usage.RecentFailed < 0 {
+			return fmt.Errorf("health report account usage is invalid")
+		}
 	}
 	return nil
 }

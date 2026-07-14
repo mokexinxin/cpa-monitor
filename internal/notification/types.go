@@ -57,6 +57,19 @@ type HealthReport struct {
 	ServicePortConnections int
 	ServicePortThreshold   int
 	AccountCount           int
+	EnabledAccountCount    int
+	AccountUsages          []AccountUsage
+}
+
+// AccountUsage is the transport-neutral request-usage summary for one enabled
+// CLIProxyAPI account.
+type AccountUsage struct {
+	Label         string
+	Provider      string
+	Success       int64
+	Failed        int64
+	RecentSuccess int64
+	RecentFailed  int64
 }
 
 // AlertSender sends one already-aggregated alert or recovery batch.

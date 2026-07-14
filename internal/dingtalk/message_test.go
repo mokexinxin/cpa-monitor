@@ -66,12 +66,16 @@ func TestHealthPayload(t *testing.T) {
 		Hostname: "host-a", Timestamp: now, NextScheduledAt: now.Add(time.Hour), BaseURL: "http://127.0.0.1:8317",
 		MemoryUsedPercent: 10, MemoryThreshold: 80, DiskMountCount: 2, HighestDiskUsedPercent: 20, DiskThreshold: 80,
 		TotalTCPConnections: 3, TotalTCPThreshold: 3000, ServicePort: 8317, ServicePortConnections: 2,
-		ServicePortThreshold: 800, AccountCount: 4,
+		ServicePortThreshold: 800, AccountCount: 4, EnabledAccountCount: 2,
+		AccountUsages: []notification.AccountUsage{
+			{Label: "one@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 2, RecentFailed: 1},
+			{Label: "team-two", Provider: "claude", Success: 4},
+		},
 	}, "en", atContent{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.Markdown.Title != "CPA Monitor · Healthy" || !strings.Contains(payload.Markdown.Text, "All monitoring checks passed") {
+	if payload.Markdown.Title != "CPA Monitor · Healthy" || !strings.Contains(payload.Markdown.Text, "All monitoring checks passed") || !strings.Contains(payload.Markdown.Text, "2 enabled / 4 checked") || !strings.Contains(payload.Markdown.Text, "one@example.test (codex)") || !strings.Contains(payload.Markdown.Text, "process total 15 (success 12 / failed 3); recent 3 (success 2 / failed 1)") {
 		t.Fatalf("payload = %#v", payload)
 	}
 }

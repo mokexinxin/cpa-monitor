@@ -138,7 +138,11 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 	t.Parallel()
 	reporter := &recordingHealthReporter{}
 	runner := newTestRunner(t, Options{
-		API: &fakeAPI{files: []cliproxy.AuthFile{{AuthIndex: "a"}, {AuthIndex: "b"}}},
+		API: &fakeAPI{files: []cliproxy.AuthFile{
+			{AuthIndex: "a", Email: "a@example.test", Provider: "codex", Success: 12, Failed: 3, RecentRequests: []cliproxy.RecentRequest{{Success: 2}, {Success: 1, Failed: 1}}},
+			{AuthIndex: "b", Email: "disabled@example.test", Disabled: true, Success: 99},
+			{AuthIndex: "c", Account: "team-c", Provider: "claude", Success: 4, RecentRequests: []cliproxy.RecentRequest{{Failed: 2}}},
+		}},
 		Collector: &fakeHostCollector{
 			memory: collector.MemoryUsage{UsedPercent: 42.5},
 			disks: collector.DiskBatch{Complete: true, Disks: []collector.DiskUsage{
@@ -155,8 +159,15 @@ func TestRunnerReportsOnlyCompleteAllHealthySnapshot(t *testing.T) {
 		t.Fatalf("snapshots = %d, want 1", len(reporter.snapshots))
 	}
 	got := reporter.snapshots[0]
-	if got.MemoryUsedPercent != 42.5 || got.HighestDiskUsedPercent != 51.2 || got.DiskMountCount != 2 || got.TotalTCPConnections != 4 || got.ServicePortConnections != 2 || got.AccountCount != 2 {
+	if got.MemoryUsedPercent != 42.5 || got.HighestDiskUsedPercent != 51.2 || got.DiskMountCount != 2 || got.TotalTCPConnections != 4 || got.ServicePortConnections != 2 || got.AccountCount != 3 || got.EnabledAccountCount != 2 {
 		t.Fatalf("snapshot = %#v", got)
+	}
+	wantUsages := []AccountUsage{
+		{Label: "a@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
+		{Label: "team-c", Provider: "claude", Success: 4, RecentFailed: 2},
+	}
+	if !reflect.DeepEqual(got.AccountUsages, wantUsages) {
+		t.Fatalf("account usages = %#v, want %#v", got.AccountUsages, wantUsages)
 	}
 }
 

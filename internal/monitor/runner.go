@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"reflect"
+	"strings"
 
 	"github.com/mokexinxin/cpa-monitor/internal/cliproxy"
 	"github.com/mokexinxin/cpa-monitor/internal/collector"
@@ -43,6 +44,20 @@ type HealthSnapshot struct {
 	ServicePortConnections int
 	ServicePortThreshold   int
 	AccountCount           int
+	EnabledAccountCount    int
+	AccountUsages          []AccountUsage
+}
+
+// AccountUsage contains the request counters exposed by CLIProxyAPI for one
+// enabled account. Success and Failed are process-lifetime counters; the
+// recent values are summed from the rolling recent_requests window.
+type AccountUsage struct {
+	Label         string
+	Provider      string
+	Success       int64
+	Failed        int64
+	RecentSuccess int64
+	RecentFailed  int64
 }
 
 // Options contains Runner dependencies and already-validated configuration
@@ -264,6 +279,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 				highestDisk = disk.UsedPercent
 			}
 		}
+		accountUsages := enabledAccountUsages(files)
 		snapshot := HealthSnapshot{
 			MemoryUsedPercent:      memory.UsedPercent,
 			MemoryThreshold:        r.memoryPercent,
@@ -276,6 +292,8 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			ServicePortConnections: tcp.ServicePortConnections,
 			ServicePortThreshold:   r.servicePortConnections,
 			AccountCount:           len(files),
+			EnabledAccountCount:    len(accountUsages),
+			AccountUsages:          accountUsages,
 		}
 		if err := r.healthReporter.ReportHealthy(ctx, snapshot); err != nil {
 			runErrors = append(runErrors, fmt.Errorf("monitor healthy report: %w", err))
@@ -284,6 +302,38 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	}
 
 	return errors.Join(runErrors...)
+}
+
+func enabledAccountUsages(files []cliproxy.AuthFile) []AccountUsage {
+	usages := make([]AccountUsage, 0, len(files))
+	for i, file := range files {
+		if file.Disabled {
+			continue
+		}
+		recentSuccess, recentFailed := int64(0), int64(0)
+		for _, bucket := range file.RecentRequests {
+			recentSuccess += bucket.Success
+			recentFailed += bucket.Failed
+		}
+		usages = append(usages, AccountUsage{
+			Label:         accountLabel(file, i+1),
+			Provider:      strings.TrimSpace(file.Provider),
+			Success:       file.Success,
+			Failed:        file.Failed,
+			RecentSuccess: recentSuccess,
+			RecentFailed:  recentFailed,
+		})
+	}
+	return usages
+}
+
+func accountLabel(file cliproxy.AuthFile, position int) string {
+	for _, candidate := range []string{file.Email, file.Account, file.Name, file.AuthIndex} {
+		if value := strings.TrimSpace(candidate); value != "" {
+			return value
+		}
+	}
+	return fmt.Sprintf("#%d", position)
 }
 
 func batchesHealthy(batches ...rule.Batch) bool {

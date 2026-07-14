@@ -112,6 +112,18 @@ func (m *Manager) ReportHealthy(ctx context.Context, snapshot monitor.HealthSnap
 		ServicePortConnections: snapshot.ServicePortConnections,
 		ServicePortThreshold:   snapshot.ServicePortThreshold,
 		AccountCount:           snapshot.AccountCount,
+		EnabledAccountCount:    snapshot.EnabledAccountCount,
+		AccountUsages:          make([]notification.AccountUsage, len(snapshot.AccountUsages)),
+	}
+	for i, usage := range snapshot.AccountUsages {
+		report.AccountUsages[i] = notification.AccountUsage{
+			Label:         usage.Label,
+			Provider:      usage.Provider,
+			Success:       usage.Success,
+			Failed:        usage.Failed,
+			RecentSuccess: usage.RecentSuccess,
+			RecentFailed:  usage.RecentFailed,
+		}
 	}
 	sendErr := m.sender.SendHealth(ctx, report)
 	current.LastAttemptAt = now

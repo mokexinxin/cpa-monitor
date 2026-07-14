@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mokexinxin/cpa-monitor/internal/notification"
 )
 
 func TestBuildMessageCreatesRFCMessage(t *testing.T) {
@@ -127,13 +129,13 @@ func TestBuildHealthMessageCreatesAccessibleHTMLAndPlainFallback(t *testing.T) {
 	}
 	parts := readAlternative(t, msg)
 	plain := string(parts["text/plain"])
-	for _, want := range []string{"状态: 健康 - 所有检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已检查 3 个"} {
+	for _, want := range []string{"状态: 健康 - 所有检查均已通过", "内存: 已使用 42.5%", "服务端口 8317: 11 个连接", "账号: 已启用 2 个 / 已检查 3 个", "账号用量 one@example.test (codex): 进程累计 15 次（成功 12 / 失败 3）；近期 4 次（成功 3 / 失败 1）"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain body does not contain %q:\n%s", want, plain)
 		}
 	}
 	htmlBody := string(parts["text/html"])
-	for _, want := range []string{"健康", "所有系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "下次计划报告"} {
+	for _, want := range []string{"健康", "所有系统运行正常", "内存", "最高磁盘使用率", "TCP 连接总数", "端口 8317", "已启用账号用量", "one@example.test (codex)", "进程累计 15 次", "下次计划报告"} {
 		if !strings.Contains(htmlBody, want) {
 			t.Errorf("HTML body does not contain %q", want)
 		}
@@ -204,6 +206,9 @@ func TestBuildMessagesInEnglish(t *testing.T) {
 	parts = readAlternative(t, msg)
 	if !strings.Contains(string(parts["text/plain"]), "Status: HEALTHY - all checks passed") || !strings.Contains(string(parts["text/html"]), "All systems are operating normally") {
 		t.Fatal("English health message was not localized")
+	}
+	if !strings.Contains(string(parts["text/plain"]), "Account usage one@example.test (codex): process total 15 (success 12 / failed 3); recent 4 (success 3 / failed 1)") || !strings.Contains(string(parts["text/html"]), "Enabled account usage") {
+		t.Fatal("English account usage was not rendered")
 	}
 	if !strings.Contains(string(parts["text/html"]), `<html lang="en">`) {
 		t.Fatal("English HTML language metadata is missing")
@@ -316,6 +321,11 @@ func validHealthReport() HealthReport {
 		ServicePortConnections: 11,
 		ServicePortThreshold:   800,
 		AccountCount:           3,
+		EnabledAccountCount:    2,
+		AccountUsages: []notification.AccountUsage{
+			{Label: "one@example.test", Provider: "codex", Success: 12, Failed: 3, RecentSuccess: 3, RecentFailed: 1},
+			{Label: "team-two", Provider: "claude", Success: 4, RecentFailed: 1},
+		},
 	}
 }
 
