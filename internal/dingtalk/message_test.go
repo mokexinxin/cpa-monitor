@@ -24,16 +24,256 @@ func TestAlertPayloadLocalizesAndLimitsItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if payload.MessageType != "markdown" || payload.Markdown.Title != "CPA Monitor · 告警 · 磁盘" {
+	if payload.MessageType != "markdown" || payload.Markdown.Title != "CPA Monitor · 磁盘告警" {
 		t.Fatalf("payload = %#v", payload)
 	}
-	for _, want := range []string{"@13800000000", "disk \\*value\\*", "另有 1 项", "CLIProxyAPI"} {
+	for _, want := range []string{"@13800000000", "状态：需要处理 · 2 个挂载点超过阈值", "disk \\*value\\*", "█████████░", "另有 1 项", "[管理面板]", "北京时间"} {
 		if !strings.Contains(payload.Markdown.Text, want) {
 			t.Errorf("markdown missing %q:\n%s", want, payload.Markdown.Text)
 		}
 	}
-	if !strings.Contains(payload.Markdown.Text, "line<br>\\# heading") {
-		t.Fatalf("multiline details were not rendered safely:\n%s", payload.Markdown.Text)
+	for _, hidden := range []string{"告警键", "disk:/", "line<br>", "\\# heading"} {
+		if strings.Contains(payload.Markdown.Text, hidden) {
+			t.Fatalf("internal detail %q was exposed:\n%s", hidden, payload.Markdown.Text)
+		}
+	}
+}
+
+func TestCompactChineseServiceAlert(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 18, 0, 0, time.UTC)
+	event := notification.Event{
+		Kind: notification.Alert, Scope: "health", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "health:cliproxy_down", Object: "CLIProxyAPI health check failed", Current: "down", Threshold: "healthy",
+		Details: "error=connection *refused*\nservice=CLIProxyAPI", BaseURL: "https://ai.harrycloud.top",
+	}
+	payload, err := alertPayload(batchForEvent(event), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 服务不可用",
+		"状态：需要处理 · CLIProxyAPI 健康检查失败",
+		"**当前状态** 无法访问",
+		"**失败原因** connection \\*refused\\*",
+		"**影响范围** 服务器健康检查未通过",
+		"告警于 07-14 22:18（北京时间）",
+	} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Fatalf("service alert missing %q:\n%s", want, payload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, payload)
+}
+
+func TestCompactChineseMemoryAlert(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 18, 0, 0, time.UTC)
+	event := notification.Event{
+		Kind: notification.Alert, Scope: "memory", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "resource:memory", Object: "memory usage 86.4%", Current: "86.4%", Threshold: "80.0%",
+		Details: "available_bytes=2336462208\nkind=memory\ntotal_bytes=17179869184\nused_bytes=15032385536\nused_percent=86.4%",
+		BaseURL: "https://ai.harrycloud.top",
+	}
+	payload, err := alertPayload(batchForEvent(event), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 内存告警",
+		"状态：需要处理 · 内存使用率超过阈值",
+		"### [告警] 内存　86.4%",
+		"█████████░",
+		"**当前** 86.4% · **阈值** 80.0%",
+		"**已用** 14 GiB / 总计 16 GiB",
+	} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Fatalf("memory alert missing %q:\n%s", want, payload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, payload)
+}
+
+func TestCompactChineseAccountAlert(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 18, 0, 0, time.UTC)
+	event := notification.Event{
+		Kind: notification.Alert, Scope: "auth", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "auth:secret-index", Object: "auth arnie.ai@icloud.com quota-like status message", Current: "quota-like status message, non-active status", Threshold: "active and available",
+		Details: "auth_index=secret-index\nemail=arnie.ai@icloud.com\nprovider=codex\nreason=quota-like status message, non-active status\nstatus=error\nstatus_message=usage #limit reached",
+		BaseURL: "https://ai.harrycloud.top",
+	}
+	payload, err := alertPayload(batchForEvent(event), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 账号告警",
+		"状态：账号异常 · 不影响服务器状态报告",
+		"### [异常] arnie.ai@icloud.com",
+		"**[异常]** 额度状态异常",
+		"**[异常]** 账号状态不是 active",
+		"**提供商** codex",
+		"**当前状态** error",
+		"**服务返回** usage \\#limit reached",
+		"**建议** 检查账号额度、凭据或重新登录账号",
+	} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Fatalf("account alert missing %q:\n%s", want, payload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, payload)
+}
+
+func TestCompactChineseDiskAndNetworkAlerts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 18, 0, 0, time.UTC)
+	disk := notification.Event{
+		Kind: notification.Alert, Scope: "disk", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "resource:disk:/data", Object: "disk /data usage 91.2%", Current: "91.2%", Threshold: "80.0%",
+		Details: "filesystem_type=ext4\nkind=disk\nmount_point=/data\ntotal_bytes=536870912000\nused_bytes=489626271744\nused_percent=91.2%",
+		BaseURL: "https://ai.harrycloud.top",
+	}
+	diskPayload, err := alertPayload(batchForEvent(disk), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 磁盘告警",
+		"### [告警] /data　91.2%",
+		"█████████░",
+		"**已用** 456 GiB / 总计 500 GiB · ext4",
+	} {
+		if !strings.Contains(diskPayload.Markdown.Text, want) {
+			t.Fatalf("disk alert missing %q:\n%s", want, diskPayload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, diskPayload)
+
+	total := notification.Event{
+		Kind: notification.Alert, Scope: "network", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "network:total_tcp", Object: "total TCP connections 3260", Current: "3260", Threshold: "3000",
+		Details: "connections=3260\nkind=total_tcp", BaseURL: "https://ai.harrycloud.top",
+	}
+	port := notification.Event{
+		Kind: notification.Alert, Scope: "network", Hostname: total.Hostname, Timestamp: now,
+		Key: "network:service_port:443", Object: "TCP connections on service port 443: 865", Current: "865", Threshold: "800",
+		Details: "connections=865\nkind=service_port_tcp\nservice_port=443", BaseURL: total.BaseURL,
+	}
+	networkBatch := notification.Batch{Kind: notification.Alert, Scope: "network", Hostname: total.Hostname, Timestamp: now, Events: []notification.Event{total, port}}
+	networkPayload, err := alertPayload(networkBatch, "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · TCP 告警",
+		"状态：需要处理 · 2 项连接指标超过阈值",
+		"### [告警] TCP 总连接",
+		"**当前** 3260 · **阈值** 3000",
+		"### [告警] 端口 443",
+		"**当前** 865 · **阈值** 800",
+	} {
+		if !strings.Contains(networkPayload.Markdown.Text, want) {
+			t.Fatalf("network alert missing %q:\n%s", want, networkPayload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, networkPayload)
+}
+
+func TestCompactChineseRecoveryAndTestMessages(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 36, 0, 0, time.UTC)
+	recovery := notification.Event{
+		Kind: notification.Recovery, Scope: "memory", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "resource:memory", Object: "memory usage 86.4% recovered", Current: "recovered", Threshold: "80.0%",
+		Details: "kind=memory\ntotal_bytes=17179869184\nused_bytes=15032385536\nused_percent=86.4%", BaseURL: "https://ai.harrycloud.top",
+	}
+	recoveryPayload, err := alertPayload(batchForEvent(recovery), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 恢复通知",
+		"状态：已恢复 · 1 项告警已经解除",
+		"### [恢复] 内存",
+		"**原告警** 86.4% · 阈值 80.0%",
+		"**当前状态** 已恢复正常",
+		"恢复于 07-14 22:36（北京时间）",
+	} {
+		if !strings.Contains(recoveryPayload.Markdown.Text, want) {
+			t.Fatalf("recovery missing %q:\n%s", want, recoveryPayload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, recoveryPayload)
+
+	testEvent := notification.Event{
+		Kind: notification.Alert, Scope: "test", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "test:notification", Object: "CPA Monitor notification test", Current: "test", Threshold: "not applicable",
+		Details: "This is an explicit CPA Monitor test notification.", BaseURL: "https://ai.harrycloud.top",
+	}
+	testPayload, err := alertPayload(batchForEvent(testEvent), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 通知测试",
+		"状态：钉钉发送链路正常",
+		"Webhook 请求成功",
+		"签名验证通过",
+		"消息格式解析正常",
+		"这是一条手动发送的测试通知。",
+		"测试于 07-14 22:36（北京时间）",
+	} {
+		if !strings.Contains(testPayload.Markdown.Text, want) {
+			t.Fatalf("test notification missing %q:\n%s", want, testPayload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, testPayload)
+}
+
+func TestCompactChineseAccountRecovery(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 14, 14, 36, 0, 0, time.UTC)
+	event := notification.Event{
+		Kind: notification.Recovery, Scope: "auth", Hostname: "easy-bird-2.localdomain", Timestamp: now,
+		Key: "auth:secret-index", Object: "auth arnie.ai@icloud.com quota-like status message recovered", Current: "recovered", Threshold: "active and available",
+		Details: "auth_index=secret-index\nemail=arnie.ai@icloud.com\nprovider=codex\nreason=quota-like status message, non-active status\nstatus=error",
+		BaseURL: "https://ai.harrycloud.top",
+	}
+	payload, err := alertPayload(batchForEvent(event), "zh-CN", 10, atContent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"CPA Monitor · 账号恢复",
+		"状态：账号已经恢复正常",
+		"### [恢复] arnie.ai@icloud.com",
+		"**原异常** 额度状态异常 · 账号状态不是 active",
+		"**当前状态** 已恢复正常",
+	} {
+		if !strings.Contains(payload.Markdown.Text, want) {
+			t.Fatalf("account recovery missing %q:\n%s", want, payload.Markdown.Text)
+		}
+	}
+	assertCompactPayloadHasNoInternalFieldsOrEmoji(t, payload)
+}
+
+func batchForEvent(event notification.Event) notification.Batch {
+	return notification.Batch{
+		Kind: event.Kind, Scope: event.Scope, Hostname: event.Hostname, Timestamp: event.Timestamp,
+		Events: []notification.Event{event},
+	}
+}
+
+func assertCompactPayloadHasNoInternalFieldsOrEmoji(t *testing.T, payload markdownPayload) {
+	t.Helper()
+	for _, hidden := range []string{"告警键", "auth_index=", "kind=", "resource:memory", "test:notification", "secret-index"} {
+		if strings.Contains(payload.Markdown.Text, hidden) {
+			t.Fatalf("compact payload exposed %q:\n%s", hidden, payload.Markdown.Text)
+		}
+	}
+	if strings.ContainsAny(payload.Markdown.Text, "✅⚠️🟡🟢🖥👤🔄") {
+		t.Fatalf("compact payload contains an emoji:\n%s", payload.Markdown.Text)
 	}
 }
 

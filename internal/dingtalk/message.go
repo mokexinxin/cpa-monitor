@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -49,19 +50,17 @@ func alertPayload(batch notification.Batch, language string, maxItems int, at at
 	if maxItems <= 0 {
 		return markdownPayload{}, errors.New("DingTalk max items must be greater than zero")
 	}
+	if language == "zh-CN" {
+		return compactChineseBatchPayload(batch, maxItems, at), nil
+	}
 
 	kind, scope := localizedKind(batch.Kind, language), localizedScope(batch.Scope, language)
 	title := fmt.Sprintf("CPA Monitor · %s · %s", kind, scope)
 	var text strings.Builder
 	writeMentions(&text, at)
 	text.WriteString("## " + escapeMarkdown(title) + "\n\n")
-	if language == "zh-CN" {
-		writeMarkdownField(&text, "主机", batch.Hostname)
-		writeMarkdownField(&text, "时间", batch.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
-	} else {
-		writeMarkdownField(&text, "Host", batch.Hostname)
-		writeMarkdownField(&text, "Time", batch.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
-	}
+	writeMarkdownField(&text, "Host", batch.Hostname)
+	writeMarkdownField(&text, "Time", batch.Timestamp.UTC().Format("2006-01-02 15:04:05 UTC"))
 
 	shown := len(batch.Events)
 	if shown > maxItems {
@@ -69,33 +68,369 @@ func alertPayload(batch notification.Batch, language string, maxItems int, at at
 	}
 	for i, event := range batch.Events[:shown] {
 		text.WriteString(fmt.Sprintf("\n### %d. %s\n\n", i+1, escapeMarkdown(event.Object)))
-		if language == "zh-CN" {
-			writeMarkdownField(&text, "当前值", event.Current)
-			writeMarkdownField(&text, "阈值", event.Threshold)
-			writeMarkdownField(&text, "告警键", event.Key)
-			writeMarkdownField(&text, "详情", event.Details)
-		} else {
-			writeMarkdownField(&text, "Current", event.Current)
-			writeMarkdownField(&text, "Threshold", event.Threshold)
-			writeMarkdownField(&text, "Alert key", event.Key)
-			writeMarkdownField(&text, "Details", event.Details)
+		writeMarkdownField(&text, "Current", event.Current)
+		writeMarkdownField(&text, "Threshold", event.Threshold)
+		writeMarkdownField(&text, "Alert key", event.Key)
+		writeMarkdownField(&text, "Details", event.Details)
+	}
+	if omitted := len(batch.Events) - shown; omitted > 0 {
+		text.WriteString(fmt.Sprintf("\n> %d additional item(s) omitted; see monitor logs.\n", omitted))
+	}
+	if baseURL := firstBaseURL(batch.Events); baseURL != "" {
+		writeMarkdownField(&text, "CLIProxyAPI base URL", baseURL)
+	}
+	return markdownPayload{MessageType: "markdown", Markdown: markdownContent{Title: truncateRunes(title, 100), Text: fitMarkdown(text.String(), language)}, At: at}, nil
+}
+
+func compactChineseBatchPayload(batch notification.Batch, maxItems int, at atContent) markdownPayload {
+	title := compactChineseBatchTitle(batch)
+	var text strings.Builder
+	writeMentions(&text, at)
+	text.WriteString("## " + title + "\n\n")
+	text.WriteString("> " + compactChineseBatchSummary(batch) + "\n\n")
+	text.WriteString("**" + escapeMarkdown(batch.Hostname) + "**\n")
+
+	shown := len(batch.Events)
+	if shown > maxItems {
+		shown = maxItems
+	}
+	if batch.Scope == "test" {
+		writeCompactChineseTest(&text)
+	} else {
+		for i := range batch.Events[:shown] {
+			text.WriteString("\n")
+			if batch.Kind == notification.Recovery {
+				writeCompactChineseRecoveryEvent(&text, batch.Scope, batch.Events[i])
+			} else {
+				writeCompactChineseAlertEvent(&text, batch.Scope, batch.Events[i])
+			}
 		}
 	}
 	if omitted := len(batch.Events) - shown; omitted > 0 {
-		if language == "zh-CN" {
-			text.WriteString(fmt.Sprintf("\n> 另有 %d 项未在消息中展开，请查看监控日志。\n", omitted))
-		} else {
-			text.WriteString(fmt.Sprintf("\n> %d additional item(s) omitted; see monitor logs.\n", omitted))
-		}
+		text.WriteString(fmt.Sprintf("\n> 另有 %d 项未展开，请查看监控日志。\n", omitted))
 	}
 	if baseURL := firstBaseURL(batch.Events); baseURL != "" {
-		if language == "zh-CN" {
-			writeMarkdownField(&text, "CLIProxyAPI 地址", baseURL)
-		} else {
-			writeMarkdownField(&text, "CLIProxyAPI base URL", baseURL)
+		text.WriteString("\n" + markdownLink("管理面板", baseURL) + "\n")
+	}
+	timeLabel := "告警于"
+	if batch.Kind == notification.Recovery {
+		timeLabel = "恢复于"
+	} else if batch.Scope == "test" {
+		timeLabel = "测试于"
+	}
+	text.WriteString(fmt.Sprintf("\n%s %s（北京时间）\n", timeLabel, formatBeijingDateTime(batch.Timestamp)))
+	return markdownPayload{
+		MessageType: "markdown",
+		Markdown: markdownContent{
+			Title: truncateRunes(title, 100),
+			Text:  fitMarkdown(text.String(), "zh-CN"),
+		},
+		At: at,
+	}
+}
+
+func compactChineseBatchTitle(batch notification.Batch) string {
+	if batch.Kind == notification.Recovery {
+		if batch.Scope == "auth" {
+			return "CPA Monitor · 账号恢复"
+		}
+		return "CPA Monitor · 恢复通知"
+	}
+	switch batch.Scope {
+	case "test":
+		return "CPA Monitor · 通知测试"
+	case "health":
+		return "CPA Monitor · 服务不可用"
+	case "memory":
+		return "CPA Monitor · 内存告警"
+	case "disk":
+		return "CPA Monitor · 磁盘告警"
+	case "network":
+		return "CPA Monitor · TCP 告警"
+	case "auth":
+		return "CPA Monitor · 账号告警"
+	default:
+		return "CPA Monitor · " + localizedScope(batch.Scope, "zh-CN") + "告警"
+	}
+}
+
+func compactChineseBatchSummary(batch notification.Batch) string {
+	if batch.Kind == notification.Recovery {
+		if batch.Scope == "auth" {
+			return "状态：账号已经恢复正常"
+		}
+		return fmt.Sprintf("状态：已恢复 · %d 项告警已经解除", len(batch.Events))
+	}
+	switch batch.Scope {
+	case "test":
+		return "状态：钉钉发送链路正常"
+	case "health":
+		return "状态：需要处理 · CLIProxyAPI 健康检查失败"
+	case "memory":
+		return "状态：需要处理 · 内存使用率超过阈值"
+	case "disk":
+		return fmt.Sprintf("状态：需要处理 · %d 个挂载点超过阈值", len(batch.Events))
+	case "network":
+		return fmt.Sprintf("状态：需要处理 · %d 项连接指标超过阈值", len(batch.Events))
+	case "auth":
+		return "状态：账号异常 · 不影响服务器状态报告"
+	default:
+		return fmt.Sprintf("状态：需要处理 · %d 项异常", len(batch.Events))
+	}
+}
+
+func writeCompactChineseTest(text *strings.Builder) {
+	text.WriteString("\n### 发送链路\n\n")
+	text.WriteString("Webhook 请求成功\n\n")
+	text.WriteString("签名验证通过\n\n")
+	text.WriteString("消息格式解析正常\n\n")
+	text.WriteString("这是一条手动发送的测试通知。\n")
+}
+
+func writeCompactChineseAlertEvent(text *strings.Builder, scope string, event notification.Event) {
+	details := parseEventDetails(event.Details)
+	switch scope {
+	case "health":
+		text.WriteString("### [告警] CLIProxyAPI\n\n")
+		writeCompactField(text, "当前状态", "无法访问")
+		if reason := strings.TrimSpace(details["error"]); reason != "" {
+			writeCompactField(text, "失败原因", truncateRunes(reason, 500))
+		}
+		writeCompactField(text, "影响范围", "服务器健康检查未通过")
+	case "memory":
+		writeCompactResourceAlert(text, "内存", event, details)
+	case "disk":
+		label := firstNonEmptyDetail(details, "mount_point")
+		if label == "" {
+			label = event.Object
+		}
+		writeCompactResourceAlert(text, label, event, details)
+	case "network":
+		text.WriteString("### [告警] " + escapeMarkdown(compactNetworkLabel(event, details)) + "\n\n")
+		writeCompactCurrentThreshold(text, event.Current, event.Threshold)
+	case "auth":
+		writeCompactChineseAuthAlert(text, event, details)
+	default:
+		text.WriteString("### [告警] " + escapeMarkdown(event.Object) + "\n\n")
+		writeCompactCurrentThreshold(text, event.Current, event.Threshold)
+	}
+}
+
+func writeCompactResourceAlert(text *strings.Builder, label string, event notification.Event, details map[string]string) {
+	heading := "### [告警] " + escapeMarkdown(label)
+	if strings.TrimSpace(event.Current) != "" {
+		heading += "　" + escapeMarkdown(event.Current)
+	}
+	text.WriteString(heading + "\n\n")
+	if percent, ok := parsePercentValue(event.Current); ok {
+		text.WriteString(quotaProgressBar(percent) + "\n\n")
+	}
+	writeCompactCurrentThreshold(text, event.Current, event.Threshold)
+	used, total := compactByteValue(details["used_bytes"]), compactByteValue(details["total_bytes"])
+	if used != "" && total != "" {
+		line := used + " / 总计 " + total
+		if filesystem := strings.TrimSpace(details["filesystem_type"]); filesystem != "" {
+			line += " · " + filesystem
+		}
+		writeCompactField(text, "已用", line)
+	}
+}
+
+func writeCompactCurrentThreshold(text *strings.Builder, current, threshold string) {
+	current, threshold = strings.TrimSpace(current), strings.TrimSpace(threshold)
+	if current == "" && threshold == "" {
+		return
+	}
+	var line strings.Builder
+	if current != "" {
+		line.WriteString("**当前** " + escapeMarkdown(current))
+	}
+	if threshold != "" {
+		if line.Len() > 0 {
+			line.WriteString(" · ")
+		}
+		line.WriteString("**阈值** " + escapeMarkdown(threshold))
+	}
+	text.WriteString(line.String() + "\n\n")
+}
+
+func writeCompactField(text *strings.Builder, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	text.WriteString("**" + escapeMarkdown(label) + "** " + escapeMarkdown(value) + "\n\n")
+}
+
+func writeCompactChineseAuthAlert(text *strings.Builder, event notification.Event, details map[string]string) {
+	label := firstNonEmptyDetail(details, "email", "account", "name")
+	if label == "" {
+		label = "账号"
+	}
+	text.WriteString("### [异常] " + escapeMarkdown(label) + "\n\n")
+	reasons := localizedAuthReasons(event.Current)
+	for _, reason := range reasons {
+		text.WriteString("**[异常]** " + escapeMarkdown(reason) + "\n\n")
+	}
+	if provider := firstNonEmptyDetail(details, "provider", "type"); provider != "" {
+		writeCompactField(text, "提供商", provider)
+	}
+	if status := strings.TrimSpace(details["status"]); status != "" {
+		writeCompactField(text, "当前状态", status)
+	}
+	if statusMessage := strings.TrimSpace(details["status_message"]); statusMessage != "" {
+		writeCompactField(text, "服务返回", truncateRunes(statusMessage, 500))
+	}
+	writeCompactField(text, "建议", "检查账号额度、凭据或重新登录账号")
+}
+
+func writeCompactChineseRecoveryEvent(text *strings.Builder, scope string, event notification.Event) {
+	details := parseEventDetails(event.Details)
+	label := compactRecoveryLabel(scope, event, details)
+	text.WriteString("### [恢复] " + escapeMarkdown(label) + "\n\n")
+	switch scope {
+	case "health":
+		writeCompactField(text, "原异常", "CLIProxyAPI 健康检查失败")
+		if reason := strings.TrimSpace(details["error"]); reason != "" {
+			writeCompactField(text, "原失败原因", truncateRunes(reason, 500))
+		}
+	case "auth":
+		reasons := localizedAuthReasons(details["reason"])
+		if len(reasons) > 0 {
+			writeCompactField(text, "原异常", strings.Join(reasons, " · "))
+		}
+	default:
+		if original := compactOriginalValue(scope, details); original != "" {
+			line := original
+			if threshold := strings.TrimSpace(event.Threshold); threshold != "" {
+				line += " · 阈值 " + threshold
+			}
+			writeCompactField(text, "原告警", line)
 		}
 	}
-	return markdownPayload{MessageType: "markdown", Markdown: markdownContent{Title: truncateRunes(title, 100), Text: fitMarkdown(text.String(), language)}, At: at}, nil
+	writeCompactField(text, "当前状态", "已恢复正常")
+}
+
+func compactRecoveryLabel(scope string, event notification.Event, details map[string]string) string {
+	switch scope {
+	case "health":
+		return "CLIProxyAPI"
+	case "memory":
+		return "内存"
+	case "disk":
+		if value := firstNonEmptyDetail(details, "mount_point"); value != "" {
+			return value
+		}
+	case "network":
+		return compactNetworkLabel(event, details)
+	case "auth":
+		if value := firstNonEmptyDetail(details, "email", "account", "name"); value != "" {
+			return value
+		}
+		return "账号"
+	}
+	value := strings.TrimSpace(strings.TrimSuffix(event.Object, " recovered"))
+	if value == "" {
+		return localizedScope(scope, "zh-CN")
+	}
+	return value
+}
+
+func compactNetworkLabel(event notification.Event, details map[string]string) string {
+	if details["kind"] == "service_port_tcp" {
+		if port := strings.TrimSpace(details["service_port"]); port != "" {
+			return "端口 " + port
+		}
+		return "服务端口连接"
+	}
+	if details["kind"] == "total_tcp" {
+		return "TCP 总连接"
+	}
+	if strings.TrimSpace(event.Object) != "" {
+		return event.Object
+	}
+	return "TCP 连接"
+}
+
+func compactOriginalValue(scope string, details map[string]string) string {
+	switch scope {
+	case "memory", "disk":
+		return strings.TrimSpace(details["used_percent"])
+	case "network":
+		return strings.TrimSpace(details["connections"])
+	default:
+		return ""
+	}
+}
+
+func parseEventDetails(value string) map[string]string {
+	details := make(map[string]string)
+	for _, line := range strings.Split(value, "\n") {
+		key, item, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			continue
+		}
+		details[key] = strings.TrimSpace(item)
+	}
+	return details
+}
+
+func firstNonEmptyDetail(details map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(details[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func localizedAuthReasons(value string) []string {
+	localized := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	for _, raw := range strings.Split(value, ",") {
+		reason := strings.TrimSpace(raw)
+		if reason == "" {
+			continue
+		}
+		switch reason {
+		case "unavailable":
+			reason = "账号不可用"
+		case "quota-like status message":
+			reason = "额度状态异常"
+		case "non-active status":
+			reason = "账号状态不是 active"
+		}
+		if _, exists := seen[reason]; exists {
+			continue
+		}
+		seen[reason] = struct{}{}
+		localized = append(localized, reason)
+	}
+	return localized
+}
+
+func parsePercentValue(value string) (float64, bool) {
+	value = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(value), "%"))
+	percent, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 || percent > 100 {
+		return 0, false
+	}
+	return percent, true
+}
+
+func compactByteValue(value string) string {
+	bytes, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return ""
+	}
+	units := [...]string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	size, unit := float64(bytes), 0
+	for size >= 1024 && unit < len(units)-1 {
+		size /= 1024
+		unit++
+	}
+	return formatCompactPercent(size) + " " + units[unit]
 }
 
 func healthPayload(report notification.HealthReport, language string, at atContent) (markdownPayload, error) {
