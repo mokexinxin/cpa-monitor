@@ -361,6 +361,38 @@ sudo journalctl -u cpa-monitor.service -n 100 --no-pager
 
 ## 11. 常见问题排查
 
+### 测试消息能到，但真实监控消息没到
+
+先运行仓库自带的只读诊断脚本。它不会打印 token、secret、management key，
+也不会在默认模式下发消息、重启服务或修改告警状态：
+
+```bash
+sudo bash scripts/diagnose-dingtalk.sh \
+  --output /tmp/cpa-monitor-dingtalk-diagnosis.txt
+```
+
+如果脚本与安装包不在服务器同一目录，可只复制
+`scripts/diagnose-dingtalk.sh` 到服务器后执行。诊断报告会检查实际运行的二进制、
+systemd daemon/timer、选定的非敏感配置、最近日志以及 `alerts.json` 中的 active
+状态。只需回传生成的诊断报告；不要回传 `config.yaml`、`cpa-monitor.env`、原始
+`alerts.json` 或 Webhook URL。
+
+最常见的情况是 `alerts.json` 已经记录了旧的 active condition。CPA Monitor 只在
+状态从正常变为异常时发送一次；从 SMTP 切换到钉钉不会自动重放仍处于异常状态的
+旧告警。不要为了测试直接删除 `alerts.json`，否则可能批量重发全部异常并丢失恢复
+历史。
+
+需要显式触发真实检查时可以使用：
+
+```bash
+sudo bash scripts/diagnose-dingtalk.sh --run-once \
+  --since '10 minutes ago' \
+  --output /tmp/cpa-monitor-dingtalk-diagnosis.txt
+```
+
+`--run-once` 是主动模式：daemon 正在运行时会重启 daemon（启动后立即检查），否则
+会启动 `cpa-monitor-once.service`。该操作可能发送消息并更新 `alerts.json`。
+
 | 现象或错误 | 可能原因 | 排查方法 |
 | --- | --- | --- |
 | `dingtalk webhook token must not be empty` | 环境变量未加载、名称写错或值为空 | 检查 YAML 的 `webhook_token_env` 和 systemd EnvironmentFile |
